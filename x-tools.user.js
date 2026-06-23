@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X Tools
 // @namespace    https://github.com/zhoubingyi
-// @version      1.0.0
-// @description  实时流速徽章、热帖排行榜、媒体下载、书签数和 Markdown 复制
+// @version      1.1.0
+// @description  实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制
 // @author       zhoubingyi
 // @match        https://*.x.com/*
 // @match        https://pro.x.com/*
@@ -787,6 +787,26 @@ article[data-testid="tweet"].xt-article-linked {
 }
 .xt-dashboard-toggle-btn:active { transform: translateY(0); }
 
+/* === Delete Panel === */
+.xt-btn-danger {
+  background: #dc2626 !important;
+  color: #fff !important;
+  border-color: #dc2626 !important;
+}
+.xt-btn-danger:hover:not(:disabled) {
+  background: #b91c1c !important;
+  border-color: #b91c1c !important;
+}
+.xt-btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.xt-delete-start:disabled + .xt-delete-stop,
+.xt-delete-stop:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Dashboard Ranked List */
 .xt-dashboard-ranked {
   max-height: 360px;
@@ -965,6 +985,12 @@ article[data-testid="tweet"].xt-article-linked {
     background: #22d3ee;
     box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4);
   }
+  .xt-delete-status {
+    background: #0f172a !important;
+    color: #94a3b8 !important;
+    border-color: #334155 !important;
+  }
+  .xt-delete-username { color: #e2e8f0 !important; }
   .xt-dashboard-ranked-text { color: #e2e8f0; }
   .xt-dashboard-ranked-meta { color: #64748b; }
   .xt-dashboard-ranked-num {
@@ -1527,6 +1553,7 @@ article[data-testid="tweet"].xt-article-linked {
 
       <div class="xt-dashboard-tabs">
         <button class="xt-dashboard-tab-btn active" data-tab="leaderboard">排行榜</button>
+        <button class="xt-dashboard-tab-btn" data-tab="delete">删除</button>
         <button class="xt-dashboard-tab-btn" data-tab="settings">设置</button>
         <button class="xt-dashboard-tab-btn" data-tab="about">关于</button>
       </div>
@@ -1611,6 +1638,30 @@ article[data-testid="tweet"].xt-article-linked {
           </div>
         </div>
 
+        <div class="xt-dashboard-panel" data-panel="delete">
+          <div class="xt-dashboard-card">
+            <h4>批量删除推文</h4>
+            <div class="xt-dashboard-info-box" style="background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.2);color:#b91c1c;">
+              删除操作不可恢复，请谨慎使用。仅在个人主页或 Replies 页面执行。
+            </div>
+            <div class="xt-dashboard-field" style="margin-top:10px;">
+              <label>当前用户名</label>
+              <div class="xt-delete-username" style="font-size:13px;color:#24180f;padding:6px 0;">未识别</div>
+            </div>
+            <div class="xt-dashboard-field">
+              <label>删除状态</label>
+              <pre class="xt-delete-status" style="white-space:pre-wrap;word-break:break-word;min-height:48px;max-height:140px;overflow:auto;margin:0;padding:8px;background:#f9f3ea;border-radius:8px;font:12px/1.45 inherit;color:#4a3a2e;">等待开始。请先进入个人主页或 Replies 页面。</pre>
+            </div>
+            <div class="xt-dashboard-field">
+              <label>操作</label>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <button type="button" class="xt-btn xt-btn-danger xt-delete-start" disabled>开始删除</button>
+                <button type="button" class="xt-btn xt-delete-stop" disabled>停止</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="xt-dashboard-panel" data-panel="about">
           <div class="xt-dashboard-card">
             <h4>X Tools</h4>
@@ -1653,6 +1704,7 @@ article[data-testid="tweet"].xt-article-linked {
       scheduleRender();
     });
 
+    wireDeleteTab(dashboardEl);
     return dashboardEl;
   }
 
@@ -1675,6 +1727,276 @@ article[data-testid="tweet"].xt-article-linked {
         requestAnimationFrame(appendWhenReady);
       }
     })();
+  }
+
+  // ── Delete X (bulk tweet deleter) ────────────────────────────
+
+  const deleteX = {
+    config: {
+      maxLoops: 100,
+      menuTimeout: 2500,
+      confirmTimeout: 3000,
+      pageLoadDelay: 1800,
+      betweenActionsDelay: 250,
+      afterDeleteDelay: 900,
+      stuckLimit: 4,
+    },
+    state: {
+      running: false,
+      stop: false,
+      deleted: 0,
+      skipped: 0,
+      failures: 0,
+      seenTweets: new WeakSet(),
+      attempts: new WeakMap(),
+      targetUsername: null,
+    },
+    el: {
+      startBtn: null,
+      stopBtn: null,
+      statusPre: null,
+      usernameDiv: null,
+    },
+
+    delay(ms) { return new Promise(r => setTimeout(r, ms)); },
+
+    normalizeText(v) { return (v || '').replace(/\s+/g, ' ').trim().toLowerCase(); },
+
+    isVisible(el) {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    },
+
+    getTargetUsername() {
+      const reserved = new Set(['compose','explore','home','i','messages','notifications','search','settings']);
+      const u = location.pathname.split('/').filter(Boolean)[0];
+      return (!u || reserved.has(u.toLowerCase())) ? null : u.toLowerCase();
+    },
+
+    getTweetUsername(tweet) {
+      const block = tweet.querySelector('[data-testid="User-Name"]');
+      const link = block?.querySelector('a[href^="/"]:not([href*="/status/"])');
+      const u = link?.getAttribute('href')?.split('/').filter(Boolean)[0];
+      return u ? u.toLowerCase() : null;
+    },
+
+    isTargetTweet(tweet) {
+      return deleteX.state.targetUsername && deleteX.getTweetUsername(tweet) === deleteX.state.targetUsername;
+    },
+
+    dispatchEscape() {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    },
+
+    safeClick(el) {
+      if (!el) return;
+      const win = el.ownerDocument?.defaultView;
+      const Ctor = win?.MouseEvent || MouseEvent;
+      for (const ev of ['mouseover', 'mousedown', 'mouseup']) {
+        try { el.dispatchEvent(new Ctor(ev, { bubbles: true, cancelable: true, view: win })); }
+        catch (_) { el.dispatchEvent(new Ctor(ev, { bubbles: true, cancelable: true })); }
+      }
+      el.click();
+    },
+
+    async waitFor(fn, timeout = 1500, interval = 80) {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        const r = fn();
+        if (r) return r;
+        await deleteX.delay(interval);
+      }
+      return null;
+    },
+
+    getVisibleTweets() {
+      return [...document.querySelectorAll('article[data-testid="tweet"]')].filter(t => deleteX.isVisible(t) && deleteX.isTargetTweet(t));
+    },
+
+    findMenuButton(tweet) {
+      const buttons = [...tweet.querySelectorAll('button[data-testid="caret"],button[aria-haspopup="menu"],button[aria-label="More"],button[aria-label="更多"],button[aria-label="More options"]')];
+      return buttons.find(b => {
+        const label = deleteX.normalizeText(b.getAttribute('aria-label'));
+        const tid = b.getAttribute('data-testid');
+        const expanded = b.getAttribute('aria-expanded');
+        return (tid === 'caret' || label.includes('more') || label.includes('更多')) && expanded !== 'true' && deleteX.isVisible(b);
+      });
+    },
+
+    getOpenMenu() {
+      const menus = [...document.querySelectorAll('div[role="menu"]')].filter(deleteX.isVisible);
+      return menus[menus.length - 1] || null;
+    },
+
+    findDeleteItem(menu) {
+      const items = [...menu.querySelectorAll('[role="menuitem"]')].filter(deleteX.isVisible);
+      return items.find(i => {
+        const text = deleteX.normalizeText(i.innerText || i.textContent);
+        return text.includes('delete') || text.includes('删除');
+      });
+    },
+
+    findConfirmButton() {
+      return ['[data-testid="confirmationSheetConfirm"]','[data-testid="tweetButton"]','button[role="button"]']
+        .flatMap(s => [...document.querySelectorAll(s)])
+        .find(b => {
+          const text = deleteX.normalizeText(b.innerText || b.textContent);
+          const tid = b.getAttribute('data-testid');
+          return deleteX.isVisible(b) && (tid === 'confirmationSheetConfirm' || text === 'delete' || text === '删除');
+        });
+    },
+
+    async openMenu(tweet, btn) {
+      tweet.scrollIntoView({ behavior: 'instant', block: 'center' });
+      await deleteX.delay(deleteX.config.betweenActionsDelay);
+      deleteX.safeClick(btn);
+      let menu = await deleteX.waitFor(deleteX.getOpenMenu, deleteX.config.menuTimeout);
+      if (menu) return menu;
+      deleteX.dispatchEscape();
+      await deleteX.delay(deleteX.config.betweenActionsDelay);
+      deleteX.safeClick(btn);
+      return deleteX.waitFor(deleteX.getOpenMenu, deleteX.config.menuTimeout);
+    },
+
+    async deleteTweet(tweet) {
+      const { state } = deleteX;
+      if (state.seenTweets.has(tweet)) return 'seen';
+      const attempts = state.attempts.get(tweet) || 0;
+      if (attempts >= 3) { state.seenTweets.add(tweet); return 'max-attempts'; }
+      state.attempts.set(tweet, attempts + 1);
+
+      const btn = deleteX.findMenuButton(tweet);
+      if (!btn) { state.seenTweets.add(tweet); return 'no-menu'; }
+
+      const menu = await deleteX.openMenu(tweet, btn);
+      if (!menu) return 'menu-fail';
+
+      const delItem = await deleteX.waitFor(() => deleteX.findDeleteItem(menu), deleteX.config.menuTimeout);
+      if (!delItem) { deleteX.dispatchEscape(); return 'no-delete-option'; }
+      deleteX.safeClick(delItem);
+
+      const confirmBtn = await deleteX.waitFor(deleteX.findConfirmButton, deleteX.config.confirmTimeout);
+      if (!confirmBtn) { deleteX.dispatchEscape(); return 'no-confirm'; }
+      deleteX.safeClick(confirmBtn);
+      await deleteX.waitFor(() => !document.body.contains(tweet) || !deleteX.isVisible(tweet), 2500);
+      await deleteX.delay(deleteX.config.afterDeleteDelay);
+
+      state.deleted++;
+      state.seenTweets.add(tweet);
+      return 'deleted';
+    },
+
+    async processTweets() {
+      const tweets = deleteX.getVisibleTweets();
+      let pass = 0;
+      deleteX.updateStatus(`找到 ${tweets.length} 条可见推文`);
+      for (const tweet of tweets) {
+        if (deleteX.state.stop) break;
+        try {
+          const r = await deleteX.deleteTweet(tweet);
+          if (r === 'deleted') { pass++; deleteX.updateStatus(`已删除第 ${deleteX.state.deleted} 条`); }
+          else if (r !== 'seen') { deleteX.state.skipped++; deleteX.updateStatus(`跳过：${r}`); }
+        } catch (err) {
+          deleteX.state.failures++;
+          deleteX.updateStatus(`删除失败：${err.message}`);
+          deleteX.dispatchEscape();
+          await deleteX.delay(deleteX.config.afterDeleteDelay);
+        }
+      }
+      return pass;
+    },
+
+    scrollMore(i) {
+      const base = Math.max(window.innerHeight * 0.9, 700);
+      const boost = Math.floor(deleteX.state.deleted / 5) * 300 + Math.min(i * 80, 800);
+      window.scrollBy({ top: base + boost, behavior: 'smooth' });
+    },
+
+    updateStatus(msg) {
+      if (!deleteX.el.statusPre) return;
+      const s = deleteX.state;
+      deleteX.el.statusPre.textContent = `${msg}\n已删除: ${s.deleted} | 跳过: ${s.skipped} | 失败: ${s.failures}`;
+    },
+
+    updateButtons() {
+      const { startBtn, stopBtn } = deleteX.el;
+      if (!startBtn || !stopBtn) return;
+      const running = deleteX.state.running;
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+      startBtn.textContent = running ? '运行中…' : '开始删除';
+    },
+
+    refreshUsername() {
+      if (!deleteX.el.usernameDiv) return;
+      deleteX.state.targetUsername = deleteX.getTargetUsername();
+      deleteX.el.usernameDiv.textContent = deleteX.state.targetUsername ? `@${deleteX.state.targetUsername}` : '未识别（请进入个人主页或 Replies 页面）';
+      deleteX.el.startBtn.disabled = !deleteX.state.targetUsername || deleteX.state.running;
+    },
+
+    async start() {
+      if (deleteX.state.running) return;
+      const ok = window.confirm('即将开始删除当前页面可见的推文/回复。\n\n删除不可恢复。确认要开始吗？');
+      if (!ok) return;
+
+      deleteX.state.stop = false;
+      deleteX.state.deleted = 0;
+      deleteX.state.skipped = 0;
+      deleteX.state.failures = 0;
+      deleteX.state.seenTweets = new WeakSet();
+      deleteX.state.attempts = new WeakMap();
+      deleteX.refreshUsername();
+      if (!deleteX.state.targetUsername) {
+        deleteX.updateStatus('无法识别用户名，请进入个人主页或 Replies 页面');
+        return;
+      }
+
+      deleteX.state.running = true;
+      deleteX.updateButtons();
+      deleteX.updateStatus(`开始执行，目标：@${deleteX.state.targetUsername}`);
+
+      let stuck = 0, prevH = document.body.scrollHeight;
+      try {
+        for (let i = 0; i < deleteX.config.maxLoops && !deleteX.state.stop; i++) {
+          const pass = await deleteX.processTweets();
+          const curH = document.body.scrollHeight;
+          stuck = (pass === 0 && curH <= prevH) ? stuck + 1 : 0;
+          if (stuck >= deleteX.config.stuckLimit) { deleteX.updateStatus('连续无进展，已自动停止'); break; }
+          prevH = curH;
+          deleteX.scrollMore(i);
+          await deleteX.delay(deleteX.config.pageLoadDelay);
+        }
+        deleteX.updateStatus(`完成：已删除 ${deleteX.state.deleted} 条，跳过 ${deleteX.state.skipped} 条，失败 ${deleteX.state.failures} 次`);
+      } finally {
+        deleteX.state.running = false;
+        deleteX.state.stop = false;
+        deleteX.updateButtons();
+      }
+    },
+
+    stop() {
+      deleteX.state.stop = true;
+      deleteX.dispatchEscape();
+      deleteX.updateStatus('收到停止信号，正在结束…');
+    },
+  };
+
+  // ── Wire up delete tab UI ────────────────────────────────────
+
+  function wireDeleteTab(dash) {
+    const startBtn = dash.querySelector('.xt-delete-start');
+    const stopBtn = dash.querySelector('.xt-delete-stop');
+    const statusPre = dash.querySelector('.xt-delete-status');
+    const usernameDiv = dash.querySelector('.xt-delete-username');
+    deleteX.el = { startBtn, stopBtn, statusPre, usernameDiv };
+
+    startBtn.addEventListener('click', () => deleteX.start());
+    stopBtn.addEventListener('click', () => deleteX.stop());
+
+    deleteX.refreshUsername();
+    deleteX.updateButtons();
   }
 
   // ─ Helpers ───────────────────────────────────────────────────
@@ -1811,6 +2133,7 @@ article[data-testid="tweet"].xt-article-linked {
   const observer = new MutationObserver(scheduleRender);
   observer.observe(document.documentElement, { childList: true, subtree: true });
   window.addEventListener('scroll', scheduleRender, { passive: true });
+  window.addEventListener('popstate', () => { if (deleteX.el.usernameDiv) deleteX.refreshUsername(); });
 
   readSettings();
   createDashboardToggleButton();
