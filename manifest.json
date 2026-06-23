@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "X Tools",
+  "version": "1.0.0",
+  "description": "X Tools：实时流速徽章、排行榜、媒体下载、书签数和 Markdown 复制。",
+  "permissions": ["storage", "downloads"],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://pro.x.com/*",
+    "https://pbs.twimg.com/*",
+    "https://video.twimg.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "X Tools"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://pro.x.com/*"],
+      "js": ["hook-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://x.com/*", "https://pro.x.com/*"],
+      "js": ["content-script.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start"
+    }
+  ]
+}
