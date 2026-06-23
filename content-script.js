@@ -9,11 +9,9 @@
     viralThreshold: 10000,
     leaderboardEnabled: true,
     leaderboardCount: 10,
-    showBookmarkCount: true,
     hotOnlyEnabled: false,
     hotOnlyRate: 1000,
     hotOnlyViews: 10000,
-    copyMarkdownEnabled: true,
     imageViewerEnabled: true,
     mediaDownloadEnabled: true,
     mediaFilenamePattern: 'twitter_{user-name}(@{user-id})_{date-time}_{status-id}_{file-type}',
@@ -100,8 +98,6 @@
         continue;
       }
       renderBadge(article, data);
-      renderBookmarkCount(article, data);
-      renderCopyButton(article, data);
       renderMediaDownloadButton(article, data);
       applyHotOnly(article, data);
     }
@@ -155,35 +151,6 @@
       el = el.parentElement;
     }
     return null;
-  }
-
-  function renderBookmarkCount(article, data) {
-    if (!settings.showBookmarkCount || !data.bookmarks || article.querySelector('.xt-bookmarks')) return;
-    const bookmark = article.querySelector('[data-testid="bookmark"], [aria-label*="Bookmark"], [aria-label*="书签"]');
-    const group = bookmark?.closest('[role="group"]') || article.querySelector('[role="group"]');
-    if (!group) return;
-    const pill = document.createElement('span');
-    pill.className = 'xt-bookmarks';
-    pill.textContent = ` ${formatCompact(data.bookmarks)}`;
-    group.appendChild(pill);
-  }
-
-  function renderCopyButton(article, data) {
-    if (!settings.copyMarkdownEnabled || article.querySelector('.xt-copy')) return;
-    const group = article.querySelector('[role="group"]');
-    if (!group) return;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'xt-copy';
-    btn.title = 'Copy as Markdown';
-    btn.textContent = 'MD';
-    btn.addEventListener('click', async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      await navigator.clipboard.writeText(buildMarkdown(article, data));
-      showToast('✓ 已复制 Markdown', 'success');
-    });
-    group.appendChild(btn);
   }
 
   function renderMediaDownloadButton(article, data) {
@@ -601,20 +568,6 @@
               </label>
             </div>
             <div class="xt-dashboard-toggle">
-              <span>显示书签数</span>
-              <label class="xt-dashboard-switch">
-                <input type="checkbox" data-key="showBookmarkCount"${settings.showBookmarkCount ? ' checked' : ''}>
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="xt-dashboard-toggle">
-              <span>Markdown 复制</span>
-              <label class="xt-dashboard-switch">
-                <input type="checkbox" data-key="copyMarkdownEnabled"${settings.copyMarkdownEnabled ? ' checked' : ''}>
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="xt-dashboard-toggle">
               <span>双击图片查看原图</span>
               <label class="xt-dashboard-switch">
                 <input type="checkbox" data-key="imageViewerEnabled"${settings.imageViewerEnabled ? ' checked' : ''}>
@@ -670,7 +623,7 @@
           <div class="xt-dashboard-card">
             <h4>X Tools</h4>
             <p class="xt-dashboard-about-text">
-              实时流速徽章、热帖排行榜、媒体下载、书签数和 Markdown 复制。<br>
+              实时流速徽章、热帖排行榜、媒体下载、批量删除推文。<br>
               本地运行，无需登录或 license。
             </p>
           </div>
@@ -1028,12 +981,6 @@
 
   function getArticleText(article) {
     return [...article.querySelectorAll('[data-testid="tweetText"]')].map((el) => el.innerText).join('\n').trim();
-  }
-
-  function buildMarkdown(article, data) {
-    const handle = data.screenName || getHandle(article);
-    const url = handle && data.id ? `https://x.com/${handle}/status/${data.id}` : location.href;
-    return `> ${data.text || getArticleText(article)}\n\n- ${handle ? `@${handle}` : 'X'}\n- ${formatCompact(data.views)} views, ${formatCompact(data.likes)} likes, ${formatCompact(data.retweets)} reposts, ${formatCompact(data.bookmarks)} bookmarks\n- ${url}`;
   }
 
   function buildMediaFilename(data, media, index) {

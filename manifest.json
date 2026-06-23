@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "X Tools",
   "version": "1.2.0",
-  "description": "实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制",
+  "description": "实时流速徽章、热帖排行榜、仅看热帖、图片查看、媒体下载和批量删除推文",
   "author": "zhoubingyi",
   "homepage_url": "https://github.com/zhoubingyi/x-tools",
   "icons": {

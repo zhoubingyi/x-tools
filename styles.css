@@ -261,7 +261,6 @@ article[data-testid="tweet"].xt-article-linked {
 }
 
 /* === Toast === */
-.xt-copy,
 .xt-media-download {
   display: inline-flex;
   align-items: center;
@@ -277,16 +276,11 @@ article[data-testid="tweet"].xt-article-linked {
   cursor: pointer;
   transition: background 120ms, color 120ms, transform 120ms;
 }
-.xt-copy {
-  font: 700 11px/1 "Inter", "Avenir Next", "PingFang SC", sans-serif;
-}
 .xt-media-download svg { display: block; }
-.xt-copy:hover,
 .xt-media-download:hover {
   background: rgba(191, 90, 42, 0.22);
   color: #8f3d17;
 }
-.xt-copy:active,
 .xt-media-download:active { transform: translateY(1px); }
 .xt-media-download--loading {
   color: #0369a1;
