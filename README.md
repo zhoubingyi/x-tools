@@ -1,6 +1,6 @@
 # X Tools
 
-为 X (Twitter) 提供实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制等功能。支持 Chrome 扩展和 Tampermonkey 油猴脚本两种安装方式。
+Chrome 浏览器扩展，为 X (Twitter) 提供实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制等功能。
 
 ## 功能
 
@@ -18,22 +18,6 @@
 | **批量删除推文** | 在 Dashboard「删除」标签页中，手动批量删除自己的推文和回复 |
 
 ## 安装
-
-### 方法一：Tampermonkey 油猴脚本（推荐）
-
-1. 先安装浏览器扩展 [Tampermonkey](https://www.tampermonkey.net/)（支持 Chrome / Edge / Firefox / Safari）
-
-2. 点击以下链接一键安装：
-
-   **👉 [https://raw.githubusercontent.com/zhoubingyi/x-tools/main/x-tools.user.js](https://raw.githubusercontent.com/zhoubingyi/x-tools/main/x-tools.user.js)**
-
-3. 在 Tampermonkey 安装页面点击「安装」
-
-4. 刷新 X/Twitter 页面即可使用
-
-> 安装后 Tampermonkey 会自动检查更新（默认每 24 小时），也可手动：Tampermonkey 管理面板 → 已安装脚本 → X Tools → 检查更新。
-
-### 方法二：Chrome 扩展（从源码加载）
 
 1. 克隆或下载本仓库：
    ```bash
@@ -122,7 +106,6 @@ x-tools/
 ├── hook-main.js         # MAIN world：拦截 fetch/XHR 获取推文数据
 ├── content-script.js    # ISOLATED world：UI 渲染、Dashboard、排行榜、删除
 ├── styles.css           # 扩展样式
-├── x-tools.user.js      # Tampermonkey 油猴脚本（单文件版，包含全部功能）
 ├── icons/               # 扩展图标
 │   ├── icon16.png
 │   ├── icon48.png
