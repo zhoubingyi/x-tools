@@ -12,19 +12,15 @@
     hotOnlyEnabled: false,
     hotOnlyRate: 1000,
     hotOnlyViews: 10000,
-    imageViewerEnabled: true,
     mediaDownloadEnabled: true,
     mediaFilenamePattern: 'twitter_{user-name}(@{user-id})_{date-time}_{status-id}_{file-type}',
-    mediaSaveHistory: true,
   };
   const STORAGE_KEY = 'xtSettings';
-  const DOWNLOAD_HISTORY_KEY = 'xtDownloadHistory';
   const tweetStore = new Map();
   let settings = { ...DEFAULTS };
   let renderTimer = 0;
   let leaderboardEl = null;
   let tooltipEl = null;
-  let lightbox = null;
   let dashboardEl = null;
 
   // Drag / resize state for leaderboard
@@ -83,7 +79,6 @@
     renderTweets();
     renderLeaderboard();
     renderDashboardLeaderboard();
-    installImageViewer();
   }
 
   // ── Tweet rendering ───────────────────────────────────────────
@@ -175,8 +170,6 @@
     if (btn.classList.contains('xt-media-download--loading')) return;
     setMediaDownloadStatus(btn, 'loading', '下载中…');
     try {
-      const history = await getDownloadHistory();
-      const alreadySaved = history.includes(data.id);
       const tasks = data.media.map((media, index) => ({
         url: media.url,
         filename: buildMediaFilename(data, media, index),
@@ -193,9 +186,6 @@
           );
         });
       }
-      if (settings.mediaSaveHistory && !alreadySaved) {
-        await setDownloadHistory([...history, data.id]);
-      }
       setMediaDownloadStatus(btn, 'done', '下载完成');
       showToast(`✓ 已开始下载 ${tasks.length} 个媒体`, 'success');
     } catch (error) {
@@ -208,20 +198,6 @@
     btn.classList.remove('xt-media-download--loading', 'xt-media-download--done', 'xt-media-download--failed');
     if (status) btn.classList.add(`xt-media-download--${status}`);
     if (title) btn.title = title;
-  }
-
-  function getDownloadHistory() {
-    return new Promise((resolve) => {
-      chrome.storage.sync.get({ [DOWNLOAD_HISTORY_KEY]: [] }, (result) => {
-        resolve(Array.isArray(result[DOWNLOAD_HISTORY_KEY]) ? result[DOWNLOAD_HISTORY_KEY] : []);
-      });
-    });
-  }
-
-  function setDownloadHistory(history) {
-    return new Promise((resolve) => {
-      chrome.storage.sync.set({ [DOWNLOAD_HISTORY_KEY]: history }, resolve);
-    });
   }
 
   function showToast(message, variant) {
@@ -478,34 +454,6 @@
     lbResizeVState = null;
   }, true);
 
-  // ── Image viewer ──────────────────────────────────────────────
-
-  function installImageViewer() {
-    if (!settings.imageViewerEnabled || document.documentElement.hasAttribute('data-xt-image-viewer')) return;
-    document.documentElement.setAttribute('data-xt-image-viewer', '1');
-    document.addEventListener('dblclick', (event) => {
-      const img = event.target?.closest?.('img[src*="twimg.com/media"]');
-      if (!img) return;
-      event.preventDefault();
-      openImage(img.src.replace(/&name=\w+/, '&name=orig'));
-    }, true);
-  }
-
-  function openImage(src) {
-    if (!lightbox) {
-      lightbox = document.createElement('div');
-      lightbox.className = 'xt-lightbox';
-      lightbox.innerHTML = '<img alt=""><button type="button">×</button>';
-      lightbox.querySelector('button').addEventListener('click', () => lightbox.classList.remove('xt-lightbox--open'));
-      lightbox.addEventListener('click', (event) => {
-        if (event.target === lightbox) lightbox.classList.remove('xt-lightbox--open');
-      });
-      document.documentElement.appendChild(lightbox);
-    }
-    lightbox.querySelector('img').src = src;
-    lightbox.classList.add('xt-lightbox--open');
-  }
-
   // ── Dashboard ─────────────────────────────────────────────────
 
   function createDashboard() {
@@ -568,23 +516,9 @@
               </label>
             </div>
             <div class="xt-dashboard-toggle">
-              <span>双击图片查看原图</span>
-              <label class="xt-dashboard-switch">
-                <input type="checkbox" data-key="imageViewerEnabled"${settings.imageViewerEnabled ? ' checked' : ''}>
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="xt-dashboard-toggle">
               <span>媒体下载按钮</span>
               <label class="xt-dashboard-switch">
                 <input type="checkbox" data-key="mediaDownloadEnabled"${settings.mediaDownloadEnabled ? ' checked' : ''}>
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="xt-dashboard-toggle">
-              <span>保存下载记录</span>
-              <label class="xt-dashboard-switch">
-                <input type="checkbox" data-key="mediaSaveHistory"${settings.mediaSaveHistory ? ' checked' : ''}>
                 <span class="slider"></span>
               </label>
             </div>
