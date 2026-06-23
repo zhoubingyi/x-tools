@@ -299,7 +299,7 @@
       + Math.min(bmRatio / 0.3, 1) * 15
     );
     const tier = velocity >= settings.viralThreshold ? 'red' : velocity >= settings.trendingThreshold ? 'orange' : 'green';
-    return { velocity, value, tier, icon: tier === 'red' ? '\u{1F525}' : tier === 'orange' ? '\u{1F680}' : '\u{1F331}' };
+    return { velocity, value, tier, icon: tier === 'red' ? '🔥' : tier === 'orange' ? '🚀' : '🌱' };
   }
 
   // ── Leaderboard (floating panel) ──────────────────────────────
@@ -575,9 +575,9 @@
               <input type="number" data-key="leaderboardCount" min="3" max="30" step="1" value="${settings.leaderboardCount}">
             </div>
             <div class="xt-dashboard-info-box">
-              <div class="tier"><span class="icon">\u{1F331}</span><span class="label">普通</span><span class="range">&lt; 流速阈值</span></div>
-              <div class="tier"><span class="icon">\u{1F680}</span><span class="label">热门</span><span class="range">≥ trending /h</span></div>
-              <div class="tier"><span class="icon">\u{1F525}</span><span class="label">爆帖</span><span class="range">≥ viral /h</span></div>
+              <div class="tier"><span class="icon">🌱</span><span class="label">普通</span><span class="range">&lt; 流速阈值</span></div>
+              <div class="tier"><span class="icon">🚀</span><span class="label">热门</span><span class="range">≥ trending /h</span></div>
+              <div class="tier"><span class="icon">🔥</span><span class="label">爆帖</span><span class="range">≥ viral /h</span></div>
             </div>
             <div class="xt-dashboard-field">
               <label>热门阈值 / h</label>

@@ -1,1019 +1,50 @@
 // ==UserScript==
 // @name         X Tools
 // @namespace    https://github.com/zhoubingyi
-// @version      1.1.1
+// @version      1.2.0
 // @description  实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制
 // @author       zhoubingyi
-// @match        https://*.x.com/*
 // @match        https://x.com/*
+// @match        https://*.x.com/*
 // @match        https://twitter.com/*
 // @match        https://pro.x.com/*
-// @match        https://pbs.twimg.com/*
-// @match        https://video.twimg.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_download
+// @grant        GM_addStyle
 // @run-at       document-start
 // @homepageURL  https://github.com/zhoubingyi/x-tools
 // @updateURL    https://raw.githubusercontent.com/zhoubingyi/x-tools/main/x-tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/zhoubingyi/x-tools/main/x-tools.user.js
+// @license      MIT
 // ==/UserScript==
 
 (() => {
   "use strict";
 
-  // ─ Inject page-world hook code (intercepts fetch / XHR) ──────
-
-  const HOOK_SOURCE = function xToolsHook() {
-    if (window.__xToolsHookInstalled) return;
-    window.__xToolsHookInstalled = true;
-
-    const GRAPHQL_RE = /\/i\/api\/graphql\//;
-
-    function postTweetsFromPayload(payload) {
-      const tweets = [];
-      scan(payload, tweets);
-      if (tweets.length) {
-        window.postMessage({ type: 'XT_TWEETS', tweets }, '*');
-      }
-    }
-
-    function scan(value, out) {
-      if (!value || typeof value !== 'object') return;
-      if (Array.isArray(value)) {
-        value.forEach((item) => scan(item, out));
-        return;
-      }
-
-      const result = value.tweet_results?.result || value.tweetResult?.result;
-      if (result) {
-        const tweet = normalizeTweet(result);
-        if (tweet) out.push(tweet);
-      }
-
-      for (const [key, child] of Object.entries(value)) {
-        if (key === 'tweet_results' || key === 'tweetResult') continue;
-        if (child && typeof child === 'object') scan(child, out);
-      }
-    }
-
-    function normalizeTweet(result) {
-      const tweet = result.tweet || result;
-      const legacy = tweet.legacy;
-      if (!legacy) return null;
-
-      const retweeted = legacy.retweeted_status_result?.result;
-      if (retweeted) return normalizeTweet(retweeted);
-
-      const views = Number.parseInt(tweet.views?.count, 10);
-      if (!Number.isFinite(views) || views <= 0) return null;
-      if (tweet.promotedMetadata || tweet.promoted_metadata || legacy.promotedMetadata) return null;
-
-      const user = tweet.core?.user_results?.result || tweet.user_results?.result || {};
-      const userLegacy = user.legacy || {};
-      const note = tweet.note_tweet?.note_tweet_results?.result;
-      const article = tweet.article?.article_results?.result;
-      const text = article?.preview_text || note?.text || legacy.full_text || legacy.text || '';
-      const screenName = userLegacy.screen_name || user.core?.screen_name || '';
-      const media = normalizeMedia(legacy.extended_entities?.media || legacy.entities?.media || []);
-
-      return {
-        id: legacy.id_str || tweet.rest_id,
-        views,
-        likes: legacy.favorite_count || 0,
-        retweets: legacy.retweet_count || 0,
-        replies: legacy.reply_count || 0,
-        bookmarks: legacy.bookmark_count || 0,
-        createdAt: legacy.created_at || '',
-        text,
-        screenName,
-        name: userLegacy.name || user.core?.name || '',
-        media,
-        isLong: Boolean(article || note?.text?.length > 600 || text.length > 600),
-      };
-    }
-
-    function normalizeMedia(items) {
-      if (!Array.isArray(items)) return [];
-      return items.map((item, index) => {
-        const type = item.type === 'animated_gif' ? 'gif' : item.type;
-        const photoUrl = item.media_url_https ? `${item.media_url_https}:orig` : '';
-        const videoUrl = item.video_info?.variants
-          ?.filter((variant) => variant.content_type === 'video/mp4' && variant.url)
-          ?.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0]?.url || '';
-        const url = type === 'photo' ? photoUrl : videoUrl;
-        if (!url) return null;
-        return {
-          url,
-          type,
-          index,
-          originalName: url.split('/').pop().split(/[:?]/)[0] || `media-${index + 1}`,
-        };
-      }).filter(Boolean);
-    }
-
-    const originalFetch = window.fetch;
-    window.fetch = async function xToolsFetch(input, init) {
-      const response = await originalFetch.apply(this, arguments);
-      try {
-        const url = typeof input === 'string' ? input : input?.url || '';
-        if (GRAPHQL_RE.test(url)) {
-          response.clone().json().then(postTweetsFromPayload).catch(() => {});
-        }
-      } catch (_) {}
-      return response;
-    };
-
-    const OriginalXHR = window.XMLHttpRequest;
-    window.XMLHttpRequest = function XToolsXHR() {
-      const xhr = new OriginalXHR();
-      let url = '';
-      const open = xhr.open;
-      xhr.open = function patchedOpen(method, requestUrl) {
-        url = String(requestUrl || '');
-        return open.apply(xhr, arguments);
-      };
-      xhr.addEventListener('load', () => {
-        if (!GRAPHQL_RE.test(url)) return;
-        try {
-          postTweetsFromPayload(JSON.parse(xhr.responseText));
-        } catch (_) {}
-      });
-      return xhr;
-    };
-  };
-
-  // Inject hook as a real <script> so it runs in page context
-  const hookScript = document.createElement('script');
-  hookScript.textContent = `(${HOOK_SOURCE})();`;
-  (document.head || document.documentElement).appendChild(hookScript);
-  hookScript.remove();
-
-  // ── CSS (injected via GM_addStyle) ────────────────────────────
-
-  const _xtCss = `
-/* === Badge: pill-solid (default) === */
-.xt-badge {
-  display: inline-flex;
-  align-items: center;
-  align-self: center;
-  gap: 4px;
-  margin-left: auto;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 16px;
-  height: fit-content;
-  color: #fff;
-  vertical-align: middle;
-  cursor: default;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.xt-badge:not([data-prefix]),
-.xt-badge:not([data-velocity]),
-.xt-badge[data-prefix=""],
-.xt-badge[data-velocity=""] {
-  display: none !important;
-}
-
-.xt-badge::before { content: attr(data-prefix); }
-.xt-badge::after { content: attr(data-velocity) "/h"; }
-
-.xt-badge--green { color: #15803d; background: rgba(22, 163, 74, 0.25); }
-.xt-badge--orange { color: #c2410c; background: rgba(234, 88, 12, 0.25); }
-.xt-badge--red { color: #b91c1c; background: rgba(220, 38, 38, 0.25); }
-
-/* === Tooltip === */
-.xt-tooltip {
-  display: none;
-  position: fixed;
-  z-index: 2147483647;
-  background: rgb(15, 20, 26);
-  color: rgb(231, 233, 234);
-  font-size: 12px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  white-space: pre-line;
-  line-height: 1.6;
-  min-width: 160px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
-}
-
-/* === Rate filter hide === */
-html[data-xt-rate-filter-on] article[data-xt-rate-hidden] {
-  display: none !important;
-}
-
-/* === Leaderboard === */
-.xt-lb {
-  display: none;
-  position: fixed;
-  right: 16px;
-  top: 72px;
-  width: 280px;
-  background: #fffcf6;
-  color: #24180f;
-  border: 1px solid rgba(86, 60, 34, 0.18);
-  border-radius: 14px;
-  font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
-  box-shadow: 0 10px 28px rgba(36, 24, 15, 0.22), 0 2px 6px rgba(36, 24, 15, 0.08);
-  z-index: 2147483646;
-  overflow: hidden;
-}
-.xt-lb.xt-lb-dragging {
-  box-shadow: 0 16px 36px rgba(36, 24, 15, 0.32), 0 2px 6px rgba(36, 24, 15, 0.12);
-  opacity: 0.96;
-}
-
-.xt-lb-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 10px 6px;
-  border-bottom: 1px solid rgba(86, 60, 34, 0.14);
-  background: linear-gradient(180deg, rgba(191, 90, 42, 0.06), rgba(191, 90, 42, 0));
-  cursor: grab;
-  user-select: none;
-  touch-action: none;
-}
-.xt-lb-head:active,
-.xt-lb.xt-lb-dragging .xt-lb-head { cursor: grabbing; }
-.xt-lb-grip {
-  font-size: 10px;
-  color: #9b877a;
-  letter-spacing: -1px;
-}
-.xt-lb-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 11px;
-  font-weight: 700;
-  color: #6e5b4d;
-  letter-spacing: 0.02em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xt-lb-controls {
-  margin-left: auto;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.xt-lb-action {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #8f3d17;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s, transform 0.12s;
-}
-.xt-lb-action:hover {
-  background: rgba(191, 90, 42, 0.14);
-  color: #6f2f11;
-}
-.xt-lb-action:active {
-  transform: translateY(1px);
-}
-.xt-lb-action svg {
-  display: block;
-  width: 16px;
-  height: 16px;
-}
-
-.xt-lb-list {
-  list-style: none;
-  margin: 0;
-  padding: 2px 0;
-  height: 300px;
-  min-height: 120px;
-  max-height: 300px;
-  overflow-y: auto;
-}
-.xt-lb-list::-webkit-scrollbar { width: 5px; }
-.xt-lb-list::-webkit-scrollbar-thumb {
-  background: rgba(86, 60, 34, 0.2);
-  border-radius: 2px;
-}
-
-/* Resize handles */
-.xt-lb-resize {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 12px;
-  height: 100%;
-  cursor: ew-resize;
-  touch-action: none;
-}
-.xt-lb-resize::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  right: 3px;
-  width: 3px;
-  height: 28px;
-  border-radius: 999px;
-  background: rgba(110, 91, 77, 0.22);
-  transform: translateY(-50%);
-  transition: background 0.12s;
-}
-.xt-lb:hover .xt-lb-resize::before {
-  background: rgba(191, 90, 42, 0.35);
-}
-
-.xt-lb-resize-v {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  height: 12px;
-  cursor: ns-resize;
-  touch-action: none;
-}
-.xt-lb-resize-v::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: 3px;
-  width: 28px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(110, 91, 77, 0.22);
-  transform: translateX(-50%);
-  transition: background 0.12s;
-}
-.xt-lb:hover .xt-lb-resize-v::before {
-  background: rgba(191, 90, 42, 0.35);
-}
-
-@media (max-width: 640px) {
-  .xt-lb {
-    right: 8px;
-    top: 64px;
-    max-width: calc(100vw - 16px);
+  // ── Inject hook (MAIN world) ────────────────────────────────────
+  try {
+    const hookScript = document.createElement('script');
+    hookScript.textContent = '(' + "(function () {\n  \"use strict\";\n  if (window.__xToolsHookInstalled) return;\n  window.__xToolsHookInstalled = true;\n\n  const GRAPHQL_RE = /\\/i\\/api\\/graphql\\//;\n\n  function postTweetsFromPayload(payload) {\n    const tweets = [];\n    scan(payload, tweets);\n    if (tweets.length) {\n      window.postMessage({ type: 'XT_TWEETS', tweets }, '*');\n    }\n  }\n\n  function scan(value, out) {\n    if (!value || typeof value !== 'object') return;\n    if (Array.isArray(value)) {\n      value.forEach((item) => scan(item, out));\n      return;\n    }\n\n    const result = value.tweet_results?.result || value.tweetResult?.result;\n    if (result) {\n      const tweet = normalizeTweet(result);\n      if (tweet) out.push(tweet);\n    }\n\n    for (const [key, child] of Object.entries(value)) {\n      if (key === 'tweet_results' || key === 'tweetResult') continue;\n      if (child && typeof child === 'object') scan(child, out);\n    }\n  }\n\n  function normalizeTweet(result) {\n    const tweet = result.tweet || result;\n    const legacy = tweet.legacy;\n    if (!legacy) return null;\n\n    const retweeted = legacy.retweeted_status_result?.result;\n    if (retweeted) return normalizeTweet(retweeted);\n\n    const views = Number.parseInt(tweet.views?.count, 10);\n    if (!Number.isFinite(views) || views <= 0) return null;\n    if (tweet.promotedMetadata || tweet.promoted_metadata || legacy.promotedMetadata) return null;\n\n    const user = tweet.core?.user_results?.result || tweet.user_results?.result || {};\n    const userLegacy = user.legacy || {};\n    const note = tweet.note_tweet?.note_tweet_results?.result;\n    const article = tweet.article?.article_results?.result;\n    const text = article?.preview_text || note?.text || legacy.full_text || legacy.text || '';\n    const screenName = userLegacy.screen_name || user.core?.screen_name || '';\n    const media = normalizeMedia(legacy.extended_entities?.media || legacy.entities?.media || []);\n\n    return {\n      id: legacy.id_str || tweet.rest_id,\n      views,\n      likes: legacy.favorite_count || 0,\n      retweets: legacy.retweet_count || 0,\n      replies: legacy.reply_count || 0,\n      bookmarks: legacy.bookmark_count || 0,\n      createdAt: legacy.created_at || '',\n      text,\n      screenName,\n      name: userLegacy.name || user.core?.name || '',\n      media,\n      isLong: Boolean(article || note?.text?.length > 600 || text.length > 600),\n    };\n  }\n\n  function normalizeMedia(items) {\n    if (!Array.isArray(items)) return [];\n    return items.map((item, index) => {\n      const type = item.type === 'animated_gif' ? 'gif' : item.type;\n      const photoUrl = item.media_url_https ? `${item.media_url_https}:orig` : '';\n      const videoUrl = item.video_info?.variants\n        ?.filter((variant) => variant.content_type === 'video/mp4' && variant.url)\n        ?.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0]?.url || '';\n      const url = type === 'photo' ? photoUrl : videoUrl;\n      if (!url) return null;\n      return {\n        url,\n        type,\n        index,\n        originalName: url.split('/').pop().split(/[:?]/)[0] || `media-${index + 1}`,\n      };\n    }).filter(Boolean);\n  }\n\n  // Override fetch\n  const originalFetch = window.fetch;\n  window.fetch = async function xToolsFetch(input, init) {\n    const response = await originalFetch.apply(this, arguments);\n    try {\n      const url = typeof input === 'string' ? input : input?.url || '';\n      if (GRAPHQL_RE.test(url)) {\n        response.clone().json().then(postTweetsFromPayload).catch(() => {});\n      }\n    } catch (_) {}\n    return response;\n  };\n\n  // Override XHR\n  const OriginalXHR = window.XMLHttpRequest;\n  window.XMLHttpRequest = function XToolsXHR() {\n    const xhr = new OriginalXHR();\n    let url = '';\n    const open = xhr.open;\n    xhr.open = function patchedOpen(method, requestUrl) {\n      url = String(requestUrl || '');\n      return open.apply(xhr, arguments);\n    };\n    xhr.addEventListener('load', () => {\n      if (!GRAPHQL_RE.test(url)) return;\n      try {\n        postTweetsFromPayload(JSON.parse(xhr.responseText));\n      } catch (_) {}\n    });\n    return xhr;\n  };\n})();" + ')();';
+    (document.head || document.documentElement).appendChild(hookScript);
+    hookScript.remove();
+  } catch (e) {
+    console.error('[X Tools] hook injection failed:', e);
   }
-}
 
-.xt-lb-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  height: 24px;
-  user-select: none;
-  transition: background 0.12s;
-}
-.xt-lb-item:hover { background: rgba(191, 90, 42, 0.10); }
-.xt-lb-rank {
-  width: 14px;
-  text-align: center;
-  color: #9b877a;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 600;
-}
-.xt-lb-icon { flex-shrink: 0; }
-.xt-lb-preview {
-  flex: 1 1 0;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #3a2b1f;
-  font-size: 11.5px;
-}
-.xt-lb-vel {
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.xt-lb-green .xt-lb-vel { color: #3b8a3f; }
-.xt-lb-orange .xt-lb-vel { color: #bf5a2a; }
-.xt-lb-red .xt-lb-vel { color: #c23c1c; }
-
-article[data-testid="tweet"].xt-article-linked {
-  outline: 2px solid #bf5a2a;
-  outline-offset: -1px;
-  border-radius: 12px;
-  transition: outline-color 0.18s;
-}
-
-/* === Toast === */
-.xt-copy,
-.xt-media-download {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  height: 24px;
-  margin-left: 8px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 999px;
-  background: rgba(191, 90, 42, 0.12);
-  color: #bf5a2a;
-  cursor: pointer;
-  transition: background 120ms, color 120ms, transform 120ms;
-}
-.xt-copy {
-  font: 700 11px/1 "Inter", "Avenir Next", "PingFang SC", sans-serif;
-}
-.xt-media-download svg { display: block; }
-.xt-copy:hover,
-.xt-media-download:hover {
-  background: rgba(191, 90, 42, 0.22);
-  color: #8f3d17;
-}
-.xt-copy:active,
-.xt-media-download:active { transform: translateY(1px); }
-.xt-media-download--loading {
-  color: #0369a1;
-  background: rgba(14, 165, 233, 0.18);
-  animation: xt-spin-pulse 900ms linear infinite;
-}
-.xt-media-download--done {
-  color: #15803d;
-  background: rgba(22, 163, 74, 0.18);
-}
-.xt-media-download--failed {
-  color: #b91c1c;
-  background: rgba(220, 38, 38, 0.18);
-}
-@keyframes xt-spin-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
-}
-
-.xt-toast {
-  position: fixed;
-  left: 50%;
-  bottom: 32px;
-  transform: translate(-50%, 12px);
-  background: rgba(15, 20, 25, 0.92);
-  color: #fff;
-  font-size: 14px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  padding: 10px 16px;
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  opacity: 0;
-  transition: opacity 180ms ease, transform 180ms ease;
-  z-index: 2147483646;
-  pointer-events: none;
-}
-.xt-toast--show {
-  opacity: 1;
-  transform: translate(-50%, 0);
-}
-.xt-toast--success {
-  background: rgba(22, 163, 74, 0.96);
-  color: #fff;
-  border: 1.5px solid rgba(134, 239, 172, 0.5);
-  font-weight: 600;
-  font-size: 15px;
-  padding: 12px 20px;
-}
-
-/* === Hot-only toggle === */
-.xt-lb-hot {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-  user-select: none;
-}
-.xt-lb-hot-label {
-  font-size: 10.5px;
-  font-weight: 500;
-  color: #6e5b4d;
-  white-space: nowrap;
-}
-.xt-lb-hot-switch {
-  position: relative;
-  display: inline-block;
-  width: 36px;
-  height: 20px;
-  flex: 0 0 36px;
-}
-.xt-lb-hot-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-  position: absolute;
-}
-.xt-lb-hot-slider {
-  position: absolute;
-  inset: 0;
-  cursor: pointer;
-  background: rgba(110, 91, 77, 0.30);
-  border-radius: 999px;
-  transition: 200ms;
-}
-.xt-lb-hot-slider::before {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: white;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  transition: 200ms;
-}
-.xt-lb-hot-switch input:checked + .xt-lb-hot-slider { background: #bf5a2a; }
-.xt-lb-hot-switch input:checked + .xt-lb-hot-slider::before { transform: translateX(16px); }
-
-/* === Dashboard Modal === */
-.xt-dashboard {
-  position: fixed;
-  top: 0;
-  right: 0;
-  width: 360px;
-  max-height: 100vh;
-  background: #fffcf6;
-  color: #24180f;
-  font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
-  box-shadow: -4px 0 24px rgba(36, 24, 15, 0.18);
-  z-index: 2147483646;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: xt-dash-slide-in 0.2s ease-out;
-}
-@keyframes xt-dash-slide-in {
-  from { transform: translateX(100%); opacity: 0; }
-  to   { transform: translateX(0);    opacity: 1; }
-}
-
-.xt-dashboard-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid rgba(86, 60, 34, 0.14);
-  flex-shrink: 0;
-}
-.xt-dashboard-title h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 700;
-  color: #24180f;
-}
-.xt-dashboard-subtitle {
-  font-size: 11px;
-  color: #6e5b4d;
-  margin-top: 2px;
-  display: block;
-}
-.xt-dashboard-close {
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 8px;
-  background: rgba(86, 60, 34, 0.08);
-  color: #6e5b4d;
-  font-size: 18px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s, color 0.12s;
-  line-height: 1;
-}
-.xt-dashboard-close:hover {
-  background: rgba(86, 60, 34, 0.16);
-  color: #24180f;
-}
-
-.xt-dashboard-tabs {
-  display: flex;
-  border-bottom: 1px solid rgba(86, 60, 34, 0.14);
-  padding: 0 12px;
-  flex-shrink: 0;
-}
-.xt-dashboard-tab-btn {
-  flex: 1;
-  padding: 10px 4px;
-  background: none;
-  border: none;
-  color: #6e5b4d;
-  font-size: 12.5px;
-  font-weight: 500;
-  cursor: pointer;
-  position: relative;
-  transition: color 0.12s;
-  font-family: inherit;
-}
-.xt-dashboard-tab-btn:hover { color: #24180f; }
-.xt-dashboard-tab-btn.active {
-  color: #24180f;
-  font-weight: 700;
-}
-.xt-dashboard-tab-btn.active::after {
-  content: "";
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: -1px;
-  height: 3px;
-  background: #bf5a2a;
-  border-radius: 2px;
-}
-
-.xt-dashboard-panels {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-}
-.xt-dashboard-panels::-webkit-scrollbar { width: 5px; }
-.xt-dashboard-panels::-webkit-scrollbar-thumb {
-  background: rgba(86, 60, 34, 0.2);
-  border-radius: 2px;
-}
-.xt-dashboard-panel { display: none; }
-.xt-dashboard-panel.active { display: block; }
-
-.xt-dashboard-card {
-  background: #fff;
-  border: 1px solid rgba(86, 60, 34, 0.12);
-  border-radius: 10px;
-  padding: 14px;
-  margin-bottom: 10px;
-}
-.xt-dashboard-card h4 {
-  margin: 0 0 10px;
-  font-size: 12px;
-  font-weight: 700;
-  color: #4a3a2e;
-  letter-spacing: 0.02em;
-}
-
-.xt-dashboard-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 8px 0;
-  font-size: 13px;
-  color: #24180f;
-}
-.xt-dashboard-switch {
-  position: relative;
-  display: inline-block;
-  width: 40px;
-  height: 22px;
-  flex: 0 0 40px;
-}
-.xt-dashboard-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
-.xt-dashboard-switch .slider {
-  position: absolute;
-  inset: 0;
-  cursor: pointer;
-  background: rgba(86, 60, 34, 0.2);
-  border-radius: 999px;
-  transition: 0.2s;
-}
-.xt-dashboard-switch .slider::before {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: white;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  transition: 0.2s;
-}
-.xt-dashboard-switch input:checked + .slider { background: #bf5a2a; }
-.xt-dashboard-switch input:checked + .slider::before { transform: translateX(18px); }
-
-.xt-dashboard-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 8px 0;
-  font-size: 12px;
-  color: #4a3a2e;
-}
-.xt-dashboard-field label { font-weight: 500; }
-.xt-dashboard-field input[type="number"],
-.xt-dashboard-field textarea {
-  padding: 8px 10px;
-  border: 1px solid rgba(86, 60, 34, 0.22);
-  border-radius: 8px;
-  background: #f9f3ea;
-  color: #24180f;
-  font: inherit;
-  font-size: 13px;
-}
-.xt-dashboard-field textarea {
-  min-height: 60px;
-  resize: vertical;
-  line-height: 1.45;
-}
-.xt-dashboard-field input:focus,
-.xt-dashboard-field textarea:focus {
-  outline: 2px solid #bf5a2a;
-  outline-offset: -1px;
-  border-color: transparent;
-}
-
-.xt-dashboard-info-box {
-  background: #f5ede1;
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 11.5px;
-  color: #4a3a2e;
-  margin: 8px 0;
-}
-.xt-dashboard-info-box .tier {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin: 3px 0;
-}
-.xt-dashboard-info-box .tier .icon { width: 18px; }
-.xt-dashboard-info-box .tier .label { flex: 1; }
-.xt-dashboard-info-box .tier .range {
-  color: #6e5b4d;
-  font-variant-numeric: tabular-nums;
-}
-
-.xt-dashboard-about-text {
-  font-size: 12px;
-  color: #4a3a2e;
-  line-height: 1.7;
-  margin: 0;
-}
-
-.xt-dashboard-toggle-btn {
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  z-index: 2147483645;
-  padding: 7px 11px;
-  background: #bf5a2a;
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  font: 700 13px/1 "Avenir Next", "PingFang SC", sans-serif;
-  letter-spacing: 0.04em;
-  box-shadow: 0 2px 8px rgba(191, 90, 42, 0.35);
-  transition: background 0.12s, transform 0.12s, box-shadow 0.12s;
-}
-.xt-dashboard-toggle-btn:hover {
-  background: #d97540;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(191, 90, 42, 0.4);
-}
-.xt-dashboard-toggle-btn:active { transform: translateY(0); }
-
-/* === Delete Panel === */
-.xt-btn-danger {
-  background: #dc2626 !important;
-  color: #fff !important;
-  border-color: #dc2626 !important;
-}
-.xt-btn-danger:hover:not(:disabled) {
-  background: #b91c1c !important;
-  border-color: #b91c1c !important;
-}
-.xt-btn-danger:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.xt-delete-start:disabled + .xt-delete-stop,
-.xt-delete-stop:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* Dashboard Ranked List */
-.xt-dashboard-ranked {
-  max-height: 360px;
-  overflow-y: auto;
-  margin: 0 -4px;
-}
-.xt-dashboard-ranked::-webkit-scrollbar { width: 5px; }
-.xt-dashboard-ranked::-webkit-scrollbar-thumb {
-  background: rgba(86, 60, 34, 0.2);
-  border-radius: 2px;
-}
-.xt-dashboard-ranked-empty {
-  text-align: center;
-  color: #6e5b4d;
-  font-size: 12px;
-  padding: 24px 12px;
-}
-.xt-dashboard-ranked-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.xt-dashboard-ranked-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.12s;
-  user-select: none;
-}
-.xt-dashboard-ranked-row:hover {
-  background: rgba(191, 90, 42, 0.08);
-}
-.xt-dashboard-ranked-num {
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-  background: rgba(86, 60, 34, 0.10);
-  color: #6e5b4d;
-  font-size: 11px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-.xt-dashboard-ranked-badge {
-  font-size: 14px;
-  flex-shrink: 0;
-  width: 18px;
-  text-align: center;
-}
-.xt-dashboard-ranked-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.xt-dashboard-ranked-text {
-  font-size: 12px;
-  color: #24180f;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.3;
-}
-.xt-dashboard-ranked-meta {
-  display: flex;
-  gap: 8px;
-  font-size: 10.5px;
-  color: #6e5b4d;
-}
-.xt-dashboard-ranked-meta span {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.xt-dashboard-ranked-vel {
-  font-size: 12px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.xt-dashboard-ranked--green  .xt-dashboard-ranked-vel { color: #3b8a3f; }
-.xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #bf5a2a; }
-.xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #c23c1c; }
-.xt-dashboard-ranked-row:nth-child(1) .xt-dashboard-ranked-num {
-  background: #c23c1c;
-  color: #fff;
-}
-.xt-dashboard-ranked-row:nth-child(2) .xt-dashboard-ranked-num {
-  background: #bf5a2a;
-  color: #fff;
-}
-.xt-dashboard-ranked-row:nth-child(3) .xt-dashboard-ranked-num {
-  background: #d97540;
-  color: #fff;
-}
-
-/* === Dark theme === */
-@media (prefers-color-scheme: dark) {
-  .xt-lb {
-    background: #0f172a;
-    color: #f8fafc;
-    border-color: #334155;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.32);
+  // ── Inject CSS ──────────────────────────────────────────────────
+  try {
+    GM_addStyle("/* === Badge: pill-solid (default) === */\n.xt-badge {\n  display: inline-flex;\n  align-items: center;\n  align-self: center;\n  gap: 4px;\n  margin-left: auto;\n  padding: 2px 7px;\n  border-radius: 999px;\n  font-size: 12px;\n  font-weight: 700;\n  line-height: 16px;\n  height: fit-content;\n  color: #fff;\n  vertical-align: middle;\n  cursor: default;\n  user-select: none;\n  white-space: nowrap;\n}\n\n.xt-badge:not([data-prefix]),\n.xt-badge:not([data-velocity]),\n.xt-badge[data-prefix=\"\"],\n.xt-badge[data-velocity=\"\"] {\n  display: none !important;\n}\n\n.xt-badge::before { content: attr(data-prefix); }\n.xt-badge::after { content: attr(data-velocity) \"/h\"; }\n\n.xt-badge--green { color: #15803d; background: rgba(22, 163, 74, 0.25); }\n.xt-badge--orange { color: #c2410c; background: rgba(234, 88, 12, 0.25); }\n.xt-badge--red { color: #b91c1c; background: rgba(220, 38, 38, 0.25); }\n\n/* === Tooltip === */\n.xt-tooltip {\n  display: none;\n  position: fixed;\n  z-index: 2147483647;\n  background: rgb(15, 20, 26);\n  color: rgb(231, 233, 234);\n  font-size: 12px;\n  padding: 10px 12px;\n  border-radius: 8px;\n  white-space: pre-line;\n  line-height: 1.6;\n  min-width: 160px;\n  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);\n}\n\n/* === Rate filter hide === */\nhtml[data-xt-rate-filter-on] article[data-xt-rate-hidden] {\n  display: none !important;\n}\n\n/* === Leaderboard === */\n.xt-lb {\n  display: none;\n  position: fixed;\n  right: 16px;\n  top: 72px;\n  width: 280px;\n  background: #fffcf6;\n  color: #24180f;\n  border: 1px solid rgba(86, 60, 34, 0.18);\n  border-radius: 14px;\n  font-family: \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  box-shadow: 0 10px 28px rgba(36, 24, 15, 0.22), 0 2px 6px rgba(36, 24, 15, 0.08);\n  z-index: 2147483646;\n  overflow: hidden;\n}\n.xt-lb.xt-lb-dragging {\n  box-shadow: 0 16px 36px rgba(36, 24, 15, 0.32), 0 2px 6px rgba(36, 24, 15, 0.12);\n  opacity: 0.96;\n}\n\n.xt-lb-head {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  padding: 7px 10px 6px;\n  border-bottom: 1px solid rgba(86, 60, 34, 0.14);\n  background: linear-gradient(180deg, rgba(191, 90, 42, 0.06), rgba(191, 90, 42, 0));\n  cursor: grab;\n  user-select: none;\n  touch-action: none;\n}\n.xt-lb-head:active,\n.xt-lb.xt-lb-dragging .xt-lb-head { cursor: grabbing; }\n.xt-lb-grip {\n  font-size: 10px;\n  color: #9b877a;\n  letter-spacing: -1px;\n}\n.xt-lb-title {\n  flex: 1;\n  min-width: 0;\n  font-size: 11px;\n  font-weight: 700;\n  color: #6e5b4d;\n  letter-spacing: 0.02em;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xt-lb-controls {\n  margin-left: auto;\n  flex: 0 0 auto;\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n}\n.xt-lb-action {\n  display: inline-flex;\n  flex: 0 0 auto;\n  align-items: center;\n  justify-content: center;\n  width: 22px;\n  height: 22px;\n  padding: 0;\n  border: none;\n  border-radius: 6px;\n  background: transparent;\n  color: #8f3d17;\n  cursor: pointer;\n  transition: background 0.12s, color 0.12s, transform 0.12s;\n}\n.xt-lb-action:hover {\n  background: rgba(191, 90, 42, 0.14);\n  color: #6f2f11;\n}\n.xt-lb-action:active {\n  transform: translateY(1px);\n}\n.xt-lb-action svg {\n  display: block;\n  width: 16px;\n  height: 16px;\n}\n\n.xt-lb-list {\n  list-style: none;\n  margin: 0;\n  padding: 2px 0;\n  height: 300px;\n  min-height: 120px;\n  max-height: 300px;\n  overflow-y: auto;\n}\n.xt-lb-list::-webkit-scrollbar { width: 5px; }\n.xt-lb-list::-webkit-scrollbar-thumb {\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 2px;\n}\n\n/* Resize handles */\n.xt-lb-resize {\n  position: absolute;\n  top: 0;\n  right: 0;\n  width: 12px;\n  height: 100%;\n  cursor: ew-resize;\n  touch-action: none;\n}\n.xt-lb-resize::before {\n  content: \"\";\n  position: absolute;\n  top: 50%;\n  right: 3px;\n  width: 3px;\n  height: 28px;\n  border-radius: 999px;\n  background: rgba(110, 91, 77, 0.22);\n  transform: translateY(-50%);\n  transition: background 0.12s;\n}\n.xt-lb:hover .xt-lb-resize::before {\n  background: rgba(191, 90, 42, 0.35);\n}\n\n.xt-lb-resize-v {\n  position: absolute;\n  bottom: 0;\n  left: 0;\n  width: 100%;\n  height: 12px;\n  cursor: ns-resize;\n  touch-action: none;\n}\n.xt-lb-resize-v::before {\n  content: \"\";\n  position: absolute;\n  left: 50%;\n  bottom: 3px;\n  width: 28px;\n  height: 3px;\n  border-radius: 999px;\n  background: rgba(110, 91, 77, 0.22);\n  transform: translateX(-50%);\n  transition: background 0.12s;\n}\n.xt-lb:hover .xt-lb-resize-v::before {\n  background: rgba(191, 90, 42, 0.35);\n}\n\n@media (max-width: 640px) {\n  .xt-lb {\n    right: 8px;\n    top: 64px;\n    max-width: calc(100vw - 16px);\n  }\n}\n\n.xt-lb-item {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  padding: 4px 12px;\n  font-size: 12px;\n  cursor: pointer;\n  height: 24px;\n  user-select: none;\n  transition: background 0.12s;\n}\n.xt-lb-item:hover { background: rgba(191, 90, 42, 0.10); }\n.xt-lb-rank {\n  width: 14px;\n  text-align: center;\n  color: #9b877a;\n  font-variant-numeric: tabular-nums;\n  font-size: 11px;\n  font-weight: 600;\n}\n.xt-lb-icon { flex-shrink: 0; }\n.xt-lb-preview {\n  flex: 1 1 0;\n  min-width: 0;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  color: #3a2b1f;\n  font-size: 11.5px;\n}\n.xt-lb-vel {\n  font-variant-numeric: tabular-nums;\n  font-size: 11px;\n  font-weight: 700;\n  flex-shrink: 0;\n}\n.xt-lb-green .xt-lb-vel { color: #3b8a3f; }\n.xt-lb-orange .xt-lb-vel { color: #bf5a2a; }\n.xt-lb-red .xt-lb-vel { color: #c23c1c; }\n\narticle[data-testid=\"tweet\"].xt-article-linked {\n  outline: 2px solid #bf5a2a;\n  outline-offset: -1px;\n  border-radius: 12px;\n  transition: outline-color 0.18s;\n}\n\n/* === Toast === */\n.xt-copy,\n.xt-media-download {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  min-width: 28px;\n  height: 24px;\n  margin-left: 8px;\n  padding: 0 7px;\n  border: 0;\n  border-radius: 999px;\n  background: rgba(191, 90, 42, 0.12);\n  color: #bf5a2a;\n  cursor: pointer;\n  transition: background 120ms, color 120ms, transform 120ms;\n}\n.xt-copy {\n  font: 700 11px/1 \"Inter\", \"Avenir Next\", \"PingFang SC\", sans-serif;\n}\n.xt-media-download svg { display: block; }\n.xt-copy:hover,\n.xt-media-download:hover {\n  background: rgba(191, 90, 42, 0.22);\n  color: #8f3d17;\n}\n.xt-copy:active,\n.xt-media-download:active { transform: translateY(1px); }\n.xt-media-download--loading {\n  color: #0369a1;\n  background: rgba(14, 165, 233, 0.18);\n  animation: xt-spin-pulse 900ms linear infinite;\n}\n.xt-media-download--done {\n  color: #15803d;\n  background: rgba(22, 163, 74, 0.18);\n}\n.xt-media-download--failed {\n  color: #b91c1c;\n  background: rgba(220, 38, 38, 0.18);\n}\n@keyframes xt-spin-pulse {\n  0%, 100% { opacity: 1; }\n  50% { opacity: 0.55; }\n}\n\n.xt-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 32px;\n  transform: translate(-50%, 12px);\n  background: rgba(15, 20, 25, 0.92);\n  color: #fff;\n  font-size: 14px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n  padding: 10px 16px;\n  border-radius: 10px;\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);\n  opacity: 0;\n  transition: opacity 180ms ease, transform 180ms ease;\n  z-index: 2147483646;\n  pointer-events: none;\n}\n.xt-toast--show {\n  opacity: 1;\n  transform: translate(-50%, 0);\n}\n.xt-toast--success {\n  background: rgba(22, 163, 74, 0.96);\n  color: #fff;\n  border: 1.5px solid rgba(134, 239, 172, 0.5);\n  font-weight: 600;\n  font-size: 15px;\n  padding: 12px 20px;\n}\n\n/* === Hot-only toggle === */\n.xt-lb-hot {\n  flex: 0 0 auto;\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  cursor: pointer;\n  user-select: none;\n}\n.xt-lb-hot-label {\n  font-size: 10.5px;\n  font-weight: 500;\n  color: #6e5b4d;\n  white-space: nowrap;\n}\n.xt-lb-hot-switch {\n  position: relative;\n  display: inline-block;\n  width: 36px;\n  height: 20px;\n  flex: 0 0 36px;\n}\n.xt-lb-hot-switch input {\n  opacity: 0;\n  width: 0;\n  height: 0;\n  position: absolute;\n}\n.xt-lb-hot-slider {\n  position: absolute;\n  inset: 0;\n  cursor: pointer;\n  background: rgba(110, 91, 77, 0.30);\n  border-radius: 999px;\n  transition: 200ms;\n}\n.xt-lb-hot-slider::before {\n  content: \"\";\n  position: absolute;\n  top: 2px;\n  left: 2px;\n  width: 16px;\n  height: 16px;\n  border-radius: 50%;\n  background: white;\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);\n  transition: 200ms;\n}\n.xt-lb-hot-switch input:checked + .xt-lb-hot-slider { background: #bf5a2a; }\n.xt-lb-hot-switch input:checked + .xt-lb-hot-slider::before { transform: translateX(16px); }\n\n/* === Dashboard Modal === */\n.xt-dashboard {\n  position: fixed;\n  top: 0;\n  right: 0;\n  width: 360px;\n  max-height: 100vh;\n  background: #fffcf6;\n  color: #24180f;\n  font-family: \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  box-shadow: -4px 0 24px rgba(36, 24, 15, 0.18);\n  z-index: 2147483646;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  animation: xt-dash-slide-in 0.2s ease-out;\n}\n@keyframes xt-dash-slide-in {\n  from { transform: translateX(100%); opacity: 0; }\n  to   { transform: translateX(0);    opacity: 1; }\n}\n\n.xt-dashboard-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 16px 10px;\n  border-bottom: 1px solid rgba(86, 60, 34, 0.14);\n  flex-shrink: 0;\n}\n.xt-dashboard-title h3 {\n  margin: 0;\n  font-size: 15px;\n  font-weight: 700;\n  color: #24180f;\n}\n.xt-dashboard-subtitle {\n  font-size: 11px;\n  color: #6e5b4d;\n  margin-top: 2px;\n  display: block;\n}\n.xt-dashboard-close {\n  width: 28px;\n  height: 28px;\n  border: none;\n  border-radius: 8px;\n  background: rgba(86, 60, 34, 0.08);\n  color: #6e5b4d;\n  font-size: 18px;\n  cursor: pointer;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  transition: background 0.12s, color 0.12s;\n  line-height: 1;\n}\n.xt-dashboard-close:hover {\n  background: rgba(86, 60, 34, 0.16);\n  color: #24180f;\n}\n\n.xt-dashboard-tabs {\n  display: flex;\n  border-bottom: 1px solid rgba(86, 60, 34, 0.14);\n  padding: 0 12px;\n  flex-shrink: 0;\n}\n.xt-dashboard-tab-btn {\n  flex: 1;\n  padding: 10px 4px;\n  background: none;\n  border: none;\n  color: #6e5b4d;\n  font-size: 12.5px;\n  font-weight: 500;\n  cursor: pointer;\n  position: relative;\n  transition: color 0.12s;\n  font-family: inherit;\n}\n.xt-dashboard-tab-btn:hover { color: #24180f; }\n.xt-dashboard-tab-btn.active {\n  color: #24180f;\n  font-weight: 700;\n}\n.xt-dashboard-tab-btn.active::after {\n  content: \"\";\n  position: absolute;\n  left: 8px;\n  right: 8px;\n  bottom: -1px;\n  height: 3px;\n  background: #bf5a2a;\n  border-radius: 2px;\n}\n\n.xt-dashboard-panels {\n  flex: 1;\n  overflow-y: auto;\n  padding: 12px;\n}\n.xt-dashboard-panels::-webkit-scrollbar { width: 5px; }\n.xt-dashboard-panels::-webkit-scrollbar-thumb {\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 2px;\n}\n.xt-dashboard-panel { display: none; }\n.xt-dashboard-panel.active { display: block; }\n\n.xt-dashboard-card {\n  background: #fff;\n  border: 1px solid rgba(86, 60, 34, 0.12);\n  border-radius: 10px;\n  padding: 14px;\n  margin-bottom: 10px;\n}\n.xt-dashboard-card h4 {\n  margin: 0 0 10px;\n  font-size: 12px;\n  font-weight: 700;\n  color: #4a3a2e;\n  letter-spacing: 0.02em;\n}\n\n.xt-dashboard-toggle {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 10px;\n  margin: 8px 0;\n  font-size: 13px;\n  color: #24180f;\n}\n.xt-dashboard-switch {\n  position: relative;\n  display: inline-block;\n  width: 40px;\n  height: 22px;\n  flex: 0 0 40px;\n}\n.xt-dashboard-switch input { opacity: 0; width: 0; height: 0; position: absolute; }\n.xt-dashboard-switch .slider {\n  position: absolute;\n  inset: 0;\n  cursor: pointer;\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 999px;\n  transition: 0.2s;\n}\n.xt-dashboard-switch .slider::before {\n  content: \"\";\n  position: absolute;\n  top: 2px;\n  left: 2px;\n  width: 18px;\n  height: 18px;\n  border-radius: 50%;\n  background: white;\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);\n  transition: 0.2s;\n}\n.xt-dashboard-switch input:checked + .slider { background: #bf5a2a; }\n.xt-dashboard-switch input:checked + .slider::before { transform: translateX(18px); }\n\n.xt-dashboard-field {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  margin: 8px 0;\n  font-size: 12px;\n  color: #4a3a2e;\n}\n.xt-dashboard-field label { font-weight: 500; }\n.xt-dashboard-field input[type=\"number\"],\n.xt-dashboard-field textarea {\n  padding: 8px 10px;\n  border: 1px solid rgba(86, 60, 34, 0.22);\n  border-radius: 8px;\n  background: #f9f3ea;\n  color: #24180f;\n  font: inherit;\n  font-size: 13px;\n}\n.xt-dashboard-field textarea {\n  min-height: 60px;\n  resize: vertical;\n  line-height: 1.45;\n}\n.xt-dashboard-field input:focus,\n.xt-dashboard-field textarea:focus {\n  outline: 2px solid #bf5a2a;\n  outline-offset: -1px;\n  border-color: transparent;\n}\n\n.xt-dashboard-info-box {\n  background: #f5ede1;\n  border-radius: 8px;\n  padding: 8px 10px;\n  font-size: 11.5px;\n  color: #4a3a2e;\n  margin: 8px 0;\n}\n.xt-dashboard-info-box .tier {\n  display: flex;\n  gap: 6px;\n  align-items: center;\n  margin: 3px 0;\n}\n.xt-dashboard-info-box .tier .icon { width: 18px; }\n.xt-dashboard-info-box .tier .label { flex: 1; }\n.xt-dashboard-info-box .tier .range {\n  color: #6e5b4d;\n  font-variant-numeric: tabular-nums;\n}\n\n.xt-dashboard-about-text {\n  font-size: 12px;\n  color: #4a3a2e;\n  line-height: 1.7;\n  margin: 0;\n}\n\n.xt-dashboard-toggle-btn {\n  position: fixed;\n  top: 20px;\n  right: 20px;\n  z-index: 2147483645;\n  padding: 7px 11px;\n  background: #bf5a2a;\n  color: #fff;\n  border: none;\n  border-radius: 8px;\n  cursor: pointer;\n  font: 700 13px/1 \"Avenir Next\", \"PingFang SC\", sans-serif;\n  letter-spacing: 0.04em;\n  box-shadow: 0 2px 8px rgba(191, 90, 42, 0.35);\n  transition: background 0.12s, transform 0.12s, box-shadow 0.12s;\n}\n.xt-dashboard-toggle-btn:hover {\n  background: #d97540;\n  transform: translateY(-1px);\n  box-shadow: 0 4px 12px rgba(191, 90, 42, 0.4);\n}\n.xt-dashboard-toggle-btn:active { transform: translateY(0); }\n\n/* === Delete Panel === */\n.xt-btn-danger {\n  background: #dc2626 !important;\n  color: #fff !important;\n  border-color: #dc2626 !important;\n}\n.xt-btn-danger:hover:not(:disabled) {\n  background: #b91c1c !important;\n  border-color: #b91c1c !important;\n}\n.xt-btn-danger:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n.xt-delete-start:disabled + .xt-delete-stop,\n.xt-delete-stop:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n\n/* Dashboard Ranked List */\n.xt-dashboard-ranked {\n  max-height: 360px;\n  overflow-y: auto;\n  margin: 0 -4px;\n}\n.xt-dashboard-ranked::-webkit-scrollbar { width: 5px; }\n.xt-dashboard-ranked::-webkit-scrollbar-thumb {\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 2px;\n}\n.xt-dashboard-ranked-empty {\n  text-align: center;\n  color: #6e5b4d;\n  font-size: 12px;\n  padding: 24px 12px;\n}\n.xt-dashboard-ranked-list {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n}\n.xt-dashboard-ranked-row {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  padding: 7px 8px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.12s;\n  user-select: none;\n}\n.xt-dashboard-ranked-row:hover {\n  background: rgba(191, 90, 42, 0.08);\n}\n.xt-dashboard-ranked-num {\n  width: 20px;\n  height: 20px;\n  border-radius: 6px;\n  background: rgba(86, 60, 34, 0.10);\n  color: #6e5b4d;\n  font-size: 11px;\n  font-weight: 700;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  flex-shrink: 0;\n  font-variant-numeric: tabular-nums;\n}\n.xt-dashboard-ranked-badge {\n  font-size: 14px;\n  flex-shrink: 0;\n  width: 18px;\n  text-align: center;\n}\n.xt-dashboard-ranked-info {\n  flex: 1;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n}\n.xt-dashboard-ranked-text {\n  font-size: 12px;\n  color: #24180f;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  line-height: 1.3;\n}\n.xt-dashboard-ranked-meta {\n  display: flex;\n  gap: 8px;\n  font-size: 10.5px;\n  color: #6e5b4d;\n}\n.xt-dashboard-ranked-meta span {\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.xt-dashboard-ranked-vel {\n  font-size: 12px;\n  font-weight: 700;\n  font-variant-numeric: tabular-nums;\n  flex-shrink: 0;\n  white-space: nowrap;\n}\n.xt-dashboard-ranked--green  .xt-dashboard-ranked-vel { color: #3b8a3f; }\n.xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #bf5a2a; }\n.xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #c23c1c; }\n.xt-dashboard-ranked-row:nth-child(1) .xt-dashboard-ranked-num {\n  background: #c23c1c;\n  color: #fff;\n}\n.xt-dashboard-ranked-row:nth-child(2) .xt-dashboard-ranked-num {\n  background: #bf5a2a;\n  color: #fff;\n}\n.xt-dashboard-ranked-row:nth-child(3) .xt-dashboard-ranked-num {\n  background: #d97540;\n  color: #fff;\n}\n\n/* === Dark theme === */\n@media (prefers-color-scheme: dark) {\n  .xt-lb {\n    background: #0f172a;\n    color: #f8fafc;\n    border-color: #334155;\n    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.32);\n  }\n  .xt-lb-head {\n    background: linear-gradient(180deg, rgba(6, 182, 212, 0.10), rgba(6, 182, 212, 0));\n    border-bottom-color: rgba(148, 163, 184, 0.18);\n  }\n  .xt-lb-grip,\n  .xt-lb-title { color: #f8fafc; }\n  .xt-lb-action { color: #cbd5e1; }\n  .xt-lb-action:hover { background: rgba(6, 182, 212, 0.16); color: #f8fafc; }\n  .xt-lb-list li { color: #cbd5e1; }\n  .xt-lb-rank { color: #94a3b8; }\n  .xt-lb-preview { color: #cbd5e1; }\n  .xt-lb-green .xt-lb-vel { color: #4ade80; }\n  .xt-lb-orange .xt-lb-vel { color: #fb923c; }\n  .xt-lb-red .xt-lb-vel { color: #ff6b4a; }\n  .xt-lb-hot-label { color: #cbd5e1; }\n  .xt-lb-hot-slider { background: #334155; }\n  .xt-lb-hot-switch input:checked + .xt-lb-hot-slider { background: #06b6d4; }\n\n  .xt-dashboard {\n    background: #0f172a;\n    color: #f8fafc;\n    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);\n  }\n  .xt-dashboard-header { border-bottom-color: #334155; }\n  .xt-dashboard-title h3 { color: #f8fafc; }\n  .xt-dashboard-subtitle { color: #94a3b8; }\n  .xt-dashboard-close {\n    background: rgba(148, 163, 184, 0.12);\n    color: #94a3b8;\n  }\n  .xt-dashboard-close:hover {\n    background: rgba(148, 163, 184, 0.2);\n    color: #f8fafc;\n  }\n  .xt-dashboard-tabs { border-bottom-color: #334155; }\n  .xt-dashboard-tab-btn { color: #94a3b8; }\n  .xt-dashboard-tab-btn:hover { color: #f8fafc; }\n  .xt-dashboard-tab-btn.active { color: #f8fafc; }\n  .xt-dashboard-tab-btn.active::after { background: #06b6d4; }\n  .xt-dashboard-card {\n    background: #1e293b;\n    border-color: #334155;\n  }\n  .xt-dashboard-card h4 { color: #cbd5e1; }\n  .xt-dashboard-toggle { color: #e2e8f0; }\n  .xt-dashboard-switch .slider { background: #334155; }\n  .xt-dashboard-switch input:checked + .slider { background: #06b6d4; }\n  .xt-dashboard-field { color: #cbd5e1; }\n  .xt-dashboard-field label { color: #94a3b8; }\n  .xt-dashboard-field input[type=\"number\"],\n  .xt-dashboard-field textarea {\n    background: #0f172a;\n    border-color: #334155;\n    color: #f8fafc;\n  }\n  .xt-dashboard-info-box { background: #1e293b; color: #94a3b8; }\n  .xt-dashboard-info-box .tier .range { color: #64748b; }\n  .xt-dashboard-about-text { color: #94a3b8; }\n  .xt-dashboard-toggle-btn {\n    background: #06b6d4;\n    box-shadow: 0 2px 8px rgba(6, 182, 212, 0.35);\n  }\n  .xt-dashboard-toggle-btn:hover {\n    background: #22d3ee;\n    box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4);\n  }\n  .xt-delete-status {\n    background: #0f172a !important;\n    color: #94a3b8 !important;\n    border-color: #334155 !important;\n  }\n  .xt-delete-username { color: #e2e8f0 !important; }\n  .xt-dashboard-ranked-text { color: #e2e8f0; }\n  .xt-dashboard-ranked-meta { color: #64748b; }\n  .xt-dashboard-ranked-num {\n    background: rgba(148, 163, 184, 0.16);\n    color: #94a3b8;\n  }\n  .xt-dashboard-ranked-row:hover { background: rgba(6, 182, 212, 0.12); }\n  .xt-dashboard-ranked-empty { color: #64748b; }\n  .xt-dashboard-ranked--green  .xt-dashboard-ranked-vel { color: #4ade80; }\n  .xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #fb923c; }\n  .xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #ff6b4a; }\n}\n");
+  } catch (e) {
+    const s = document.createElement('style');
+    s.textContent = "/* === Badge: pill-solid (default) === */\n.xt-badge {\n  display: inline-flex;\n  align-items: center;\n  align-self: center;\n  gap: 4px;\n  margin-left: auto;\n  padding: 2px 7px;\n  border-radius: 999px;\n  font-size: 12px;\n  font-weight: 700;\n  line-height: 16px;\n  height: fit-content;\n  color: #fff;\n  vertical-align: middle;\n  cursor: default;\n  user-select: none;\n  white-space: nowrap;\n}\n\n.xt-badge:not([data-prefix]),\n.xt-badge:not([data-velocity]),\n.xt-badge[data-prefix=\"\"],\n.xt-badge[data-velocity=\"\"] {\n  display: none !important;\n}\n\n.xt-badge::before { content: attr(data-prefix); }\n.xt-badge::after { content: attr(data-velocity) \"/h\"; }\n\n.xt-badge--green { color: #15803d; background: rgba(22, 163, 74, 0.25); }\n.xt-badge--orange { color: #c2410c; background: rgba(234, 88, 12, 0.25); }\n.xt-badge--red { color: #b91c1c; background: rgba(220, 38, 38, 0.25); }\n\n/* === Tooltip === */\n.xt-tooltip {\n  display: none;\n  position: fixed;\n  z-index: 2147483647;\n  background: rgb(15, 20, 26);\n  color: rgb(231, 233, 234);\n  font-size: 12px;\n  padding: 10px 12px;\n  border-radius: 8px;\n  white-space: pre-line;\n  line-height: 1.6;\n  min-width: 160px;\n  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);\n}\n\n/* === Rate filter hide === */\nhtml[data-xt-rate-filter-on] article[data-xt-rate-hidden] {\n  display: none !important;\n}\n\n/* === Leaderboard === */\n.xt-lb {\n  display: none;\n  position: fixed;\n  right: 16px;\n  top: 72px;\n  width: 280px;\n  background: #fffcf6;\n  color: #24180f;\n  border: 1px solid rgba(86, 60, 34, 0.18);\n  border-radius: 14px;\n  font-family: \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  box-shadow: 0 10px 28px rgba(36, 24, 15, 0.22), 0 2px 6px rgba(36, 24, 15, 0.08);\n  z-index: 2147483646;\n  overflow: hidden;\n}\n.xt-lb.xt-lb-dragging {\n  box-shadow: 0 16px 36px rgba(36, 24, 15, 0.32), 0 2px 6px rgba(36, 24, 15, 0.12);\n  opacity: 0.96;\n}\n\n.xt-lb-head {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  padding: 7px 10px 6px;\n  border-bottom: 1px solid rgba(86, 60, 34, 0.14);\n  background: linear-gradient(180deg, rgba(191, 90, 42, 0.06), rgba(191, 90, 42, 0));\n  cursor: grab;\n  user-select: none;\n  touch-action: none;\n}\n.xt-lb-head:active,\n.xt-lb.xt-lb-dragging .xt-lb-head { cursor: grabbing; }\n.xt-lb-grip {\n  font-size: 10px;\n  color: #9b877a;\n  letter-spacing: -1px;\n}\n.xt-lb-title {\n  flex: 1;\n  min-width: 0;\n  font-size: 11px;\n  font-weight: 700;\n  color: #6e5b4d;\n  letter-spacing: 0.02em;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xt-lb-controls {\n  margin-left: auto;\n  flex: 0 0 auto;\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n}\n.xt-lb-action {\n  display: inline-flex;\n  flex: 0 0 auto;\n  align-items: center;\n  justify-content: center;\n  width: 22px;\n  height: 22px;\n  padding: 0;\n  border: none;\n  border-radius: 6px;\n  background: transparent;\n  color: #8f3d17;\n  cursor: pointer;\n  transition: background 0.12s, color 0.12s, transform 0.12s;\n}\n.xt-lb-action:hover {\n  background: rgba(191, 90, 42, 0.14);\n  color: #6f2f11;\n}\n.xt-lb-action:active {\n  transform: translateY(1px);\n}\n.xt-lb-action svg {\n  display: block;\n  width: 16px;\n  height: 16px;\n}\n\n.xt-lb-list {\n  list-style: none;\n  margin: 0;\n  padding: 2px 0;\n  height: 300px;\n  min-height: 120px;\n  max-height: 300px;\n  overflow-y: auto;\n}\n.xt-lb-list::-webkit-scrollbar { width: 5px; }\n.xt-lb-list::-webkit-scrollbar-thumb {\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 2px;\n}\n\n/* Resize handles */\n.xt-lb-resize {\n  position: absolute;\n  top: 0;\n  right: 0;\n  width: 12px;\n  height: 100%;\n  cursor: ew-resize;\n  touch-action: none;\n}\n.xt-lb-resize::before {\n  content: \"\";\n  position: absolute;\n  top: 50%;\n  right: 3px;\n  width: 3px;\n  height: 28px;\n  border-radius: 999px;\n  background: rgba(110, 91, 77, 0.22);\n  transform: translateY(-50%);\n  transition: background 0.12s;\n}\n.xt-lb:hover .xt-lb-resize::before {\n  background: rgba(191, 90, 42, 0.35);\n}\n\n.xt-lb-resize-v {\n  position: absolute;\n  bottom: 0;\n  left: 0;\n  width: 100%;\n  height: 12px;\n  cursor: ns-resize;\n  touch-action: none;\n}\n.xt-lb-resize-v::before {\n  content: \"\";\n  position: absolute;\n  left: 50%;\n  bottom: 3px;\n  width: 28px;\n  height: 3px;\n  border-radius: 999px;\n  background: rgba(110, 91, 77, 0.22);\n  transform: translateX(-50%);\n  transition: background 0.12s;\n}\n.xt-lb:hover .xt-lb-resize-v::before {\n  background: rgba(191, 90, 42, 0.35);\n}\n\n@media (max-width: 640px) {\n  .xt-lb {\n    right: 8px;\n    top: 64px;\n    max-width: calc(100vw - 16px);\n  }\n}\n\n.xt-lb-item {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  padding: 4px 12px;\n  font-size: 12px;\n  cursor: pointer;\n  height: 24px;\n  user-select: none;\n  transition: background 0.12s;\n}\n.xt-lb-item:hover { background: rgba(191, 90, 42, 0.10); }\n.xt-lb-rank {\n  width: 14px;\n  text-align: center;\n  color: #9b877a;\n  font-variant-numeric: tabular-nums;\n  font-size: 11px;\n  font-weight: 600;\n}\n.xt-lb-icon { flex-shrink: 0; }\n.xt-lb-preview {\n  flex: 1 1 0;\n  min-width: 0;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  color: #3a2b1f;\n  font-size: 11.5px;\n}\n.xt-lb-vel {\n  font-variant-numeric: tabular-nums;\n  font-size: 11px;\n  font-weight: 700;\n  flex-shrink: 0;\n}\n.xt-lb-green .xt-lb-vel { color: #3b8a3f; }\n.xt-lb-orange .xt-lb-vel { color: #bf5a2a; }\n.xt-lb-red .xt-lb-vel { color: #c23c1c; }\n\narticle[data-testid=\"tweet\"].xt-article-linked {\n  outline: 2px solid #bf5a2a;\n  outline-offset: -1px;\n  border-radius: 12px;\n  transition: outline-color 0.18s;\n}\n\n/* === Toast === */\n.xt-copy,\n.xt-media-download {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  min-width: 28px;\n  height: 24px;\n  margin-left: 8px;\n  padding: 0 7px;\n  border: 0;\n  border-radius: 999px;\n  background: rgba(191, 90, 42, 0.12);\n  color: #bf5a2a;\n  cursor: pointer;\n  transition: background 120ms, color 120ms, transform 120ms;\n}\n.xt-copy {\n  font: 700 11px/1 \"Inter\", \"Avenir Next\", \"PingFang SC\", sans-serif;\n}\n.xt-media-download svg { display: block; }\n.xt-copy:hover,\n.xt-media-download:hover {\n  background: rgba(191, 90, 42, 0.22);\n  color: #8f3d17;\n}\n.xt-copy:active,\n.xt-media-download:active { transform: translateY(1px); }\n.xt-media-download--loading {\n  color: #0369a1;\n  background: rgba(14, 165, 233, 0.18);\n  animation: xt-spin-pulse 900ms linear infinite;\n}\n.xt-media-download--done {\n  color: #15803d;\n  background: rgba(22, 163, 74, 0.18);\n}\n.xt-media-download--failed {\n  color: #b91c1c;\n  background: rgba(220, 38, 38, 0.18);\n}\n@keyframes xt-spin-pulse {\n  0%, 100% { opacity: 1; }\n  50% { opacity: 0.55; }\n}\n\n.xt-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 32px;\n  transform: translate(-50%, 12px);\n  background: rgba(15, 20, 25, 0.92);\n  color: #fff;\n  font-size: 14px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n  padding: 10px 16px;\n  border-radius: 10px;\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);\n  opacity: 0;\n  transition: opacity 180ms ease, transform 180ms ease;\n  z-index: 2147483646;\n  pointer-events: none;\n}\n.xt-toast--show {\n  opacity: 1;\n  transform: translate(-50%, 0);\n}\n.xt-toast--success {\n  background: rgba(22, 163, 74, 0.96);\n  color: #fff;\n  border: 1.5px solid rgba(134, 239, 172, 0.5);\n  font-weight: 600;\n  font-size: 15px;\n  padding: 12px 20px;\n}\n\n/* === Hot-only toggle === */\n.xt-lb-hot {\n  flex: 0 0 auto;\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  cursor: pointer;\n  user-select: none;\n}\n.xt-lb-hot-label {\n  font-size: 10.5px;\n  font-weight: 500;\n  color: #6e5b4d;\n  white-space: nowrap;\n}\n.xt-lb-hot-switch {\n  position: relative;\n  display: inline-block;\n  width: 36px;\n  height: 20px;\n  flex: 0 0 36px;\n}\n.xt-lb-hot-switch input {\n  opacity: 0;\n  width: 0;\n  height: 0;\n  position: absolute;\n}\n.xt-lb-hot-slider {\n  position: absolute;\n  inset: 0;\n  cursor: pointer;\n  background: rgba(110, 91, 77, 0.30);\n  border-radius: 999px;\n  transition: 200ms;\n}\n.xt-lb-hot-slider::before {\n  content: \"\";\n  position: absolute;\n  top: 2px;\n  left: 2px;\n  width: 16px;\n  height: 16px;\n  border-radius: 50%;\n  background: white;\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);\n  transition: 200ms;\n}\n.xt-lb-hot-switch input:checked + .xt-lb-hot-slider { background: #bf5a2a; }\n.xt-lb-hot-switch input:checked + .xt-lb-hot-slider::before { transform: translateX(16px); }\n\n/* === Dashboard Modal === */\n.xt-dashboard {\n  position: fixed;\n  top: 0;\n  right: 0;\n  width: 360px;\n  max-height: 100vh;\n  background: #fffcf6;\n  color: #24180f;\n  font-family: \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  box-shadow: -4px 0 24px rgba(36, 24, 15, 0.18);\n  z-index: 2147483646;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  animation: xt-dash-slide-in 0.2s ease-out;\n}\n@keyframes xt-dash-slide-in {\n  from { transform: translateX(100%); opacity: 0; }\n  to   { transform: translateX(0);    opacity: 1; }\n}\n\n.xt-dashboard-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 16px 10px;\n  border-bottom: 1px solid rgba(86, 60, 34, 0.14);\n  flex-shrink: 0;\n}\n.xt-dashboard-title h3 {\n  margin: 0;\n  font-size: 15px;\n  font-weight: 700;\n  color: #24180f;\n}\n.xt-dashboard-subtitle {\n  font-size: 11px;\n  color: #6e5b4d;\n  margin-top: 2px;\n  display: block;\n}\n.xt-dashboard-close {\n  width: 28px;\n  height: 28px;\n  border: none;\n  border-radius: 8px;\n  background: rgba(86, 60, 34, 0.08);\n  color: #6e5b4d;\n  font-size: 18px;\n  cursor: pointer;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  transition: background 0.12s, color 0.12s;\n  line-height: 1;\n}\n.xt-dashboard-close:hover {\n  background: rgba(86, 60, 34, 0.16);\n  color: #24180f;\n}\n\n.xt-dashboard-tabs {\n  display: flex;\n  border-bottom: 1px solid rgba(86, 60, 34, 0.14);\n  padding: 0 12px;\n  flex-shrink: 0;\n}\n.xt-dashboard-tab-btn {\n  flex: 1;\n  padding: 10px 4px;\n  background: none;\n  border: none;\n  color: #6e5b4d;\n  font-size: 12.5px;\n  font-weight: 500;\n  cursor: pointer;\n  position: relative;\n  transition: color 0.12s;\n  font-family: inherit;\n}\n.xt-dashboard-tab-btn:hover { color: #24180f; }\n.xt-dashboard-tab-btn.active {\n  color: #24180f;\n  font-weight: 700;\n}\n.xt-dashboard-tab-btn.active::after {\n  content: \"\";\n  position: absolute;\n  left: 8px;\n  right: 8px;\n  bottom: -1px;\n  height: 3px;\n  background: #bf5a2a;\n  border-radius: 2px;\n}\n\n.xt-dashboard-panels {\n  flex: 1;\n  overflow-y: auto;\n  padding: 12px;\n}\n.xt-dashboard-panels::-webkit-scrollbar { width: 5px; }\n.xt-dashboard-panels::-webkit-scrollbar-thumb {\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 2px;\n}\n.xt-dashboard-panel { display: none; }\n.xt-dashboard-panel.active { display: block; }\n\n.xt-dashboard-card {\n  background: #fff;\n  border: 1px solid rgba(86, 60, 34, 0.12);\n  border-radius: 10px;\n  padding: 14px;\n  margin-bottom: 10px;\n}\n.xt-dashboard-card h4 {\n  margin: 0 0 10px;\n  font-size: 12px;\n  font-weight: 700;\n  color: #4a3a2e;\n  letter-spacing: 0.02em;\n}\n\n.xt-dashboard-toggle {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 10px;\n  margin: 8px 0;\n  font-size: 13px;\n  color: #24180f;\n}\n.xt-dashboard-switch {\n  position: relative;\n  display: inline-block;\n  width: 40px;\n  height: 22px;\n  flex: 0 0 40px;\n}\n.xt-dashboard-switch input { opacity: 0; width: 0; height: 0; position: absolute; }\n.xt-dashboard-switch .slider {\n  position: absolute;\n  inset: 0;\n  cursor: pointer;\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 999px;\n  transition: 0.2s;\n}\n.xt-dashboard-switch .slider::before {\n  content: \"\";\n  position: absolute;\n  top: 2px;\n  left: 2px;\n  width: 18px;\n  height: 18px;\n  border-radius: 50%;\n  background: white;\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);\n  transition: 0.2s;\n}\n.xt-dashboard-switch input:checked + .slider { background: #bf5a2a; }\n.xt-dashboard-switch input:checked + .slider::before { transform: translateX(18px); }\n\n.xt-dashboard-field {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  margin: 8px 0;\n  font-size: 12px;\n  color: #4a3a2e;\n}\n.xt-dashboard-field label { font-weight: 500; }\n.xt-dashboard-field input[type=\"number\"],\n.xt-dashboard-field textarea {\n  padding: 8px 10px;\n  border: 1px solid rgba(86, 60, 34, 0.22);\n  border-radius: 8px;\n  background: #f9f3ea;\n  color: #24180f;\n  font: inherit;\n  font-size: 13px;\n}\n.xt-dashboard-field textarea {\n  min-height: 60px;\n  resize: vertical;\n  line-height: 1.45;\n}\n.xt-dashboard-field input:focus,\n.xt-dashboard-field textarea:focus {\n  outline: 2px solid #bf5a2a;\n  outline-offset: -1px;\n  border-color: transparent;\n}\n\n.xt-dashboard-info-box {\n  background: #f5ede1;\n  border-radius: 8px;\n  padding: 8px 10px;\n  font-size: 11.5px;\n  color: #4a3a2e;\n  margin: 8px 0;\n}\n.xt-dashboard-info-box .tier {\n  display: flex;\n  gap: 6px;\n  align-items: center;\n  margin: 3px 0;\n}\n.xt-dashboard-info-box .tier .icon { width: 18px; }\n.xt-dashboard-info-box .tier .label { flex: 1; }\n.xt-dashboard-info-box .tier .range {\n  color: #6e5b4d;\n  font-variant-numeric: tabular-nums;\n}\n\n.xt-dashboard-about-text {\n  font-size: 12px;\n  color: #4a3a2e;\n  line-height: 1.7;\n  margin: 0;\n}\n\n.xt-dashboard-toggle-btn {\n  position: fixed;\n  top: 20px;\n  right: 20px;\n  z-index: 2147483645;\n  padding: 7px 11px;\n  background: #bf5a2a;\n  color: #fff;\n  border: none;\n  border-radius: 8px;\n  cursor: pointer;\n  font: 700 13px/1 \"Avenir Next\", \"PingFang SC\", sans-serif;\n  letter-spacing: 0.04em;\n  box-shadow: 0 2px 8px rgba(191, 90, 42, 0.35);\n  transition: background 0.12s, transform 0.12s, box-shadow 0.12s;\n}\n.xt-dashboard-toggle-btn:hover {\n  background: #d97540;\n  transform: translateY(-1px);\n  box-shadow: 0 4px 12px rgba(191, 90, 42, 0.4);\n}\n.xt-dashboard-toggle-btn:active { transform: translateY(0); }\n\n/* === Delete Panel === */\n.xt-btn-danger {\n  background: #dc2626 !important;\n  color: #fff !important;\n  border-color: #dc2626 !important;\n}\n.xt-btn-danger:hover:not(:disabled) {\n  background: #b91c1c !important;\n  border-color: #b91c1c !important;\n}\n.xt-btn-danger:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n.xt-delete-start:disabled + .xt-delete-stop,\n.xt-delete-stop:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n\n/* Dashboard Ranked List */\n.xt-dashboard-ranked {\n  max-height: 360px;\n  overflow-y: auto;\n  margin: 0 -4px;\n}\n.xt-dashboard-ranked::-webkit-scrollbar { width: 5px; }\n.xt-dashboard-ranked::-webkit-scrollbar-thumb {\n  background: rgba(86, 60, 34, 0.2);\n  border-radius: 2px;\n}\n.xt-dashboard-ranked-empty {\n  text-align: center;\n  color: #6e5b4d;\n  font-size: 12px;\n  padding: 24px 12px;\n}\n.xt-dashboard-ranked-list {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n}\n.xt-dashboard-ranked-row {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  padding: 7px 8px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.12s;\n  user-select: none;\n}\n.xt-dashboard-ranked-row:hover {\n  background: rgba(191, 90, 42, 0.08);\n}\n.xt-dashboard-ranked-num {\n  width: 20px;\n  height: 20px;\n  border-radius: 6px;\n  background: rgba(86, 60, 34, 0.10);\n  color: #6e5b4d;\n  font-size: 11px;\n  font-weight: 700;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  flex-shrink: 0;\n  font-variant-numeric: tabular-nums;\n}\n.xt-dashboard-ranked-badge {\n  font-size: 14px;\n  flex-shrink: 0;\n  width: 18px;\n  text-align: center;\n}\n.xt-dashboard-ranked-info {\n  flex: 1;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n}\n.xt-dashboard-ranked-text {\n  font-size: 12px;\n  color: #24180f;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  line-height: 1.3;\n}\n.xt-dashboard-ranked-meta {\n  display: flex;\n  gap: 8px;\n  font-size: 10.5px;\n  color: #6e5b4d;\n}\n.xt-dashboard-ranked-meta span {\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.xt-dashboard-ranked-vel {\n  font-size: 12px;\n  font-weight: 700;\n  font-variant-numeric: tabular-nums;\n  flex-shrink: 0;\n  white-space: nowrap;\n}\n.xt-dashboard-ranked--green  .xt-dashboard-ranked-vel { color: #3b8a3f; }\n.xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #bf5a2a; }\n.xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #c23c1c; }\n.xt-dashboard-ranked-row:nth-child(1) .xt-dashboard-ranked-num {\n  background: #c23c1c;\n  color: #fff;\n}\n.xt-dashboard-ranked-row:nth-child(2) .xt-dashboard-ranked-num {\n  background: #bf5a2a;\n  color: #fff;\n}\n.xt-dashboard-ranked-row:nth-child(3) .xt-dashboard-ranked-num {\n  background: #d97540;\n  color: #fff;\n}\n\n/* === Dark theme === */\n@media (prefers-color-scheme: dark) {\n  .xt-lb {\n    background: #0f172a;\n    color: #f8fafc;\n    border-color: #334155;\n    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.32);\n  }\n  .xt-lb-head {\n    background: linear-gradient(180deg, rgba(6, 182, 212, 0.10), rgba(6, 182, 212, 0));\n    border-bottom-color: rgba(148, 163, 184, 0.18);\n  }\n  .xt-lb-grip,\n  .xt-lb-title { color: #f8fafc; }\n  .xt-lb-action { color: #cbd5e1; }\n  .xt-lb-action:hover { background: rgba(6, 182, 212, 0.16); color: #f8fafc; }\n  .xt-lb-list li { color: #cbd5e1; }\n  .xt-lb-rank { color: #94a3b8; }\n  .xt-lb-preview { color: #cbd5e1; }\n  .xt-lb-green .xt-lb-vel { color: #4ade80; }\n  .xt-lb-orange .xt-lb-vel { color: #fb923c; }\n  .xt-lb-red .xt-lb-vel { color: #ff6b4a; }\n  .xt-lb-hot-label { color: #cbd5e1; }\n  .xt-lb-hot-slider { background: #334155; }\n  .xt-lb-hot-switch input:checked + .xt-lb-hot-slider { background: #06b6d4; }\n\n  .xt-dashboard {\n    background: #0f172a;\n    color: #f8fafc;\n    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);\n  }\n  .xt-dashboard-header { border-bottom-color: #334155; }\n  .xt-dashboard-title h3 { color: #f8fafc; }\n  .xt-dashboard-subtitle { color: #94a3b8; }\n  .xt-dashboard-close {\n    background: rgba(148, 163, 184, 0.12);\n    color: #94a3b8;\n  }\n  .xt-dashboard-close:hover {\n    background: rgba(148, 163, 184, 0.2);\n    color: #f8fafc;\n  }\n  .xt-dashboard-tabs { border-bottom-color: #334155; }\n  .xt-dashboard-tab-btn { color: #94a3b8; }\n  .xt-dashboard-tab-btn:hover { color: #f8fafc; }\n  .xt-dashboard-tab-btn.active { color: #f8fafc; }\n  .xt-dashboard-tab-btn.active::after { background: #06b6d4; }\n  .xt-dashboard-card {\n    background: #1e293b;\n    border-color: #334155;\n  }\n  .xt-dashboard-card h4 { color: #cbd5e1; }\n  .xt-dashboard-toggle { color: #e2e8f0; }\n  .xt-dashboard-switch .slider { background: #334155; }\n  .xt-dashboard-switch input:checked + .slider { background: #06b6d4; }\n  .xt-dashboard-field { color: #cbd5e1; }\n  .xt-dashboard-field label { color: #94a3b8; }\n  .xt-dashboard-field input[type=\"number\"],\n  .xt-dashboard-field textarea {\n    background: #0f172a;\n    border-color: #334155;\n    color: #f8fafc;\n  }\n  .xt-dashboard-info-box { background: #1e293b; color: #94a3b8; }\n  .xt-dashboard-info-box .tier .range { color: #64748b; }\n  .xt-dashboard-about-text { color: #94a3b8; }\n  .xt-dashboard-toggle-btn {\n    background: #06b6d4;\n    box-shadow: 0 2px 8px rgba(6, 182, 212, 0.35);\n  }\n  .xt-dashboard-toggle-btn:hover {\n    background: #22d3ee;\n    box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4);\n  }\n  .xt-delete-status {\n    background: #0f172a !important;\n    color: #94a3b8 !important;\n    border-color: #334155 !important;\n  }\n  .xt-delete-username { color: #e2e8f0 !important; }\n  .xt-dashboard-ranked-text { color: #e2e8f0; }\n  .xt-dashboard-ranked-meta { color: #64748b; }\n  .xt-dashboard-ranked-num {\n    background: rgba(148, 163, 184, 0.16);\n    color: #94a3b8;\n  }\n  .xt-dashboard-ranked-row:hover { background: rgba(6, 182, 212, 0.12); }\n  .xt-dashboard-ranked-empty { color: #64748b; }\n  .xt-dashboard-ranked--green  .xt-dashboard-ranked-vel { color: #4ade80; }\n  .xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #fb923c; }\n  .xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #ff6b4a; }\n}\n";
+    (document.head || document.documentElement).appendChild(s);
   }
-  .xt-lb-head {
-    background: linear-gradient(180deg, rgba(6, 182, 212, 0.10), rgba(6, 182, 212, 0));
-    border-bottom-color: rgba(148, 163, 184, 0.18);
-  }
-  .xt-lb-grip,
-  .xt-lb-title { color: #f8fafc; }
-  .xt-lb-action { color: #cbd5e1; }
-  .xt-lb-action:hover { background: rgba(6, 182, 212, 0.16); color: #f8fafc; }
-  .xt-lb-list li { color: #cbd5e1; }
-  .xt-lb-rank { color: #94a3b8; }
-  .xt-lb-preview { color: #cbd5e1; }
-  .xt-lb-green .xt-lb-vel { color: #4ade80; }
-  .xt-lb-orange .xt-lb-vel { color: #fb923c; }
-  .xt-lb-red .xt-lb-vel { color: #ff6b4a; }
-  .xt-lb-hot-label { color: #cbd5e1; }
-  .xt-lb-hot-slider { background: #334155; }
-  .xt-lb-hot-switch input:checked + .xt-lb-hot-slider { background: #06b6d4; }
 
-  .xt-dashboard {
-    background: #0f172a;
-    color: #f8fafc;
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
-  }
-  .xt-dashboard-header { border-bottom-color: #334155; }
-  .xt-dashboard-title h3 { color: #f8fafc; }
-  .xt-dashboard-subtitle { color: #94a3b8; }
-  .xt-dashboard-close {
-    background: rgba(148, 163, 184, 0.12);
-    color: #94a3b8;
-  }
-  .xt-dashboard-close:hover {
-    background: rgba(148, 163, 184, 0.2);
-    color: #f8fafc;
-  }
-  .xt-dashboard-tabs { border-bottom-color: #334155; }
-  .xt-dashboard-tab-btn { color: #94a3b8; }
-  .xt-dashboard-tab-btn:hover { color: #f8fafc; }
-  .xt-dashboard-tab-btn.active { color: #f8fafc; }
-  .xt-dashboard-tab-btn.active::after { background: #06b6d4; }
-  .xt-dashboard-card {
-    background: #1e293b;
-    border-color: #334155;
-  }
-  .xt-dashboard-card h4 { color: #cbd5e1; }
-  .xt-dashboard-toggle { color: #e2e8f0; }
-  .xt-dashboard-switch .slider { background: #334155; }
-  .xt-dashboard-switch input:checked + .slider { background: #06b6d4; }
-  .xt-dashboard-field { color: #cbd5e1; }
-  .xt-dashboard-field label { color: #94a3b8; }
-  .xt-dashboard-field input[type="number"],
-  .xt-dashboard-field textarea {
-    background: #0f172a;
-    border-color: #334155;
-    color: #f8fafc;
-  }
-  .xt-dashboard-info-box { background: #1e293b; color: #94a3b8; }
-  .xt-dashboard-info-box .tier .range { color: #64748b; }
-  .xt-dashboard-about-text { color: #94a3b8; }
-  .xt-dashboard-toggle-btn {
-    background: #06b6d4;
-    box-shadow: 0 2px 8px rgba(6, 182, 212, 0.35);
-  }
-  .xt-dashboard-toggle-btn:hover {
-    background: #22d3ee;
-    box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4);
-  }
-  .xt-delete-status {
-    background: #0f172a !important;
-    color: #94a3b8 !important;
-    border-color: #334155 !important;
-  }
-  .xt-delete-username { color: #e2e8f0 !important; }
-  .xt-dashboard-ranked-text { color: #e2e8f0; }
-  .xt-dashboard-ranked-meta { color: #64748b; }
-  .xt-dashboard-ranked-num {
-    background: rgba(148, 163, 184, 0.16);
-    color: #94a3b8;
-  }
-  .xt-dashboard-ranked-row:hover { background: rgba(6, 182, 212, 0.12); }
-  .xt-dashboard-ranked-empty { color: #64748b; }
-  .xt-dashboard-ranked--green  .xt-dashboard-ranked-vel { color: #4ade80; }
-  .xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #fb923c; }
-  .xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #ff6b4a; }
-}
-`;
-
-  if (typeof GM_addStyle === 'function') {
-    GM_addStyle(_xtCss);
-  } else {
-    const style = document.createElement('style');
-    style.textContent = _xtCss;
-    (document.head || document.documentElement).appendChild(style);
-  }
+  // ── Main script ─────────────────────────────────────────────────
+  (() => {
+  "use strict";
 
   // ── Constants & State ─────────────────────────────────────────
 
@@ -1040,13 +71,14 @@ article[data-testid="tweet"].xt-article-linked {
   let leaderboardEl = null;
   let tooltipEl = null;
   let lightbox = null;
+  let dashboardEl = null;
 
   // Drag / resize state for leaderboard
   let lbDragState = null;
   let lbResizeState = null;
   let lbResizeVState = null;
 
-  // ── Storage (GM_* wrappers) ──────────────────────────────────
+  // ── Storage (chrome.storage.sync wrappers) ────────────────────
 
   function readSettings() {
     settings = { ...DEFAULTS, ...(GM_getValue(STORAGE_KEY) || {}) };
@@ -1065,7 +97,7 @@ article[data-testid="tweet"].xt-article-linked {
     });
   }
 
-  // ── Tweet data from injected hook (postMessage) ──────────────
+  // ── Tweet data from hook (postMessage) ────────────────────────
 
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.data?.type !== 'XT_TWEETS') return;
@@ -1253,9 +285,8 @@ article[data-testid="tweet"].xt-article-linked {
   }
 
   function getDownloadHistory() {
-    return new Promise((resolve) => {
-      resolve(Array.isArray(GM_getValue(DOWNLOAD_HISTORY_KEY)) ? GM_getValue(DOWNLOAD_HISTORY_KEY) : []);
-    });
+    const val = GM_getValue(DOWNLOAD_HISTORY_KEY);
+    return Promise.resolve(Array.isArray(val) ? val : []);
   }
 
   function setDownloadHistory(history) {
@@ -1305,7 +336,7 @@ article[data-testid="tweet"].xt-article-linked {
       + Math.min(bmRatio / 0.3, 1) * 15
     );
     const tier = velocity >= settings.viralThreshold ? 'red' : velocity >= settings.trendingThreshold ? 'orange' : 'green';
-    return { velocity, value, tier, icon: tier === 'red' ? '\u{1F525}' : tier === 'orange' ? '\u{1F680}' : '\u{1F331}' };
+    return { velocity, value, tier, icon: tier === 'red' ? '🔥' : tier === 'orange' ? '🚀' : '🌱' };
   }
 
   // ── Leaderboard (floating panel) ──────────────────────────────
@@ -1327,7 +358,7 @@ article[data-testid="tweet"].xt-article-linked {
             </span>
           </label>
           <button type="button" class="xt-lb-action xt-lb-action-back" title="设置" aria-label="设置">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
           </button>
         </div>
       </div>
@@ -1546,8 +577,6 @@ article[data-testid="tweet"].xt-article-linked {
   }
 
   // ── Dashboard ─────────────────────────────────────────────────
-
-  let dashboardEl = null;
 
   function createDashboard() {
     if (dashboardEl) return dashboardEl;
@@ -2153,4 +1182,5 @@ article[data-testid="tweet"].xt-article-linked {
   } catch (err) {
     console.error('[X Tools] init error:', err);
   }
+})();
 })();
