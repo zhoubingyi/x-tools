@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "X Tools",
+  "version": "1.2.0",
+  "description": "实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制",
+  "author": "zhoubingyi",
+  "homepage_url": "https://github.com/zhoubingyi/x-tools",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "downloads"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://pro.x.com/*"
+      ],
+      "js": ["hook-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://pro.x.com/*"
+      ],
+      "js": ["content-script.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}
