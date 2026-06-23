@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         X Tools
 // @namespace    https://github.com/zhoubingyi
-// @version      1.1.0
+// @version      1.1.1
 // @description  实时流速徽章、热帖排行榜、批量删除推文、媒体下载、书签数和 Markdown 复制
 // @author       zhoubingyi
 // @match        https://*.x.com/*
+// @match        https://x.com/*
+// @match        https://twitter.com/*
 // @match        https://pro.x.com/*
 // @match        https://pbs.twimg.com/*
 // @match        https://video.twimg.com/*
@@ -150,7 +152,7 @@
 
   // ── CSS (injected via GM_addStyle) ────────────────────────────
 
-  GM_addStyle(`
+  const _xtCss = `
 /* === Badge: pill-solid (default) === */
 .xt-badge {
   display: inline-flex;
@@ -1003,7 +1005,15 @@ article[data-testid="tweet"].xt-article-linked {
   .xt-dashboard-ranked--orange .xt-dashboard-ranked-vel { color: #fb923c; }
   .xt-dashboard-ranked--red    .xt-dashboard-ranked-vel { color: #ff6b4a; }
 }
-`);
+`;
+
+  if (typeof GM_addStyle === 'function') {
+    GM_addStyle(_xtCss);
+  } else {
+    const style = document.createElement('style');
+    style.textContent = _xtCss;
+    (document.head || document.documentElement).appendChild(style);
+  }
 
   // ── Constants & State ─────────────────────────────────────────
 
@@ -1048,10 +1058,12 @@ article[data-testid="tweet"].xt-article-linked {
     GM_setValue(STORAGE_KEY, settings);
   }
 
-  GM_addValueChangeListener(STORAGE_KEY, (_name, _oldVal, newVal) => {
-    settings = { ...DEFAULTS, ...(newVal || {}) };
-    scheduleRender();
-  });
+  if (typeof GM_addValueChangeListener === 'function') {
+    GM_addValueChangeListener(STORAGE_KEY, (_name, _oldVal, newVal) => {
+      settings = { ...DEFAULTS, ...(newVal || {}) };
+      scheduleRender();
+    });
+  }
 
   // ── Tweet data from injected hook (postMessage) ──────────────
 
@@ -2130,11 +2142,15 @@ article[data-testid="tweet"].xt-article-linked {
 
   // ─ Init ──────────────────────────────────────────────────────
 
-  const observer = new MutationObserver(scheduleRender);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener('scroll', scheduleRender, { passive: true });
-  window.addEventListener('popstate', () => { if (deleteX.el.usernameDiv) deleteX.refreshUsername(); });
+  try {
+    const observer = new MutationObserver(scheduleRender);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('scroll', scheduleRender, { passive: true });
+    window.addEventListener('popstate', () => { if (deleteX.el.usernameDiv) deleteX.refreshUsername(); });
 
-  readSettings();
-  createDashboardToggleButton();
+    readSettings();
+    createDashboardToggleButton();
+  } catch (err) {
+    console.error('[X Tools] init error:', err);
+  }
 })();
